@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>晖映探针</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <h1>晖映探针</h1>
+  <span class="spacer"></span>
+  <span id="chips"></span>
+  <span id="updated" class="sub">正在读取…</span>
+  <button id="refresh" class="btn">刷新</button>
+</header>
+
+<main>
+  <div class="sheet">
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th class="c-status">状态</th>
+          <th class="c-name">节点</th>
+          <th class="c-date">到期时间</th>
+          <th class="c-uptime">在线时间</th>
+          <th class="c-load">负载</th>
+          <th class="c-net">网络 ↓ / ↑</th>
+          <th class="c-traffic">流量 ↓ / ↑</th>
+          <th class="c-bar">CPU</th>
+          <th class="c-bar">RAM</th>
+          <th class="c-bar">硬盘</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <footer>zstat · 小鱼自己写的探针</footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
