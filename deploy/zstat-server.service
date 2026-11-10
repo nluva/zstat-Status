@@ -1,0 +1,16 @@
+[Unit]
+Description=zstat server (probe receiver + web)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/zstat
+ExecStart=/usr/bin/python3 /opt/zstat/server.py
+Restart=always
+RestartSec=3
+User=root
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
