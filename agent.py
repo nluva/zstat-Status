@@ -158,6 +158,7 @@ def main():
             "location": cfg.get("location", ""),
             "region": cfg.get("region", ""),
             "type": cfg.get("expire", ""),
+            "cycle": cfg.get("cycle", ""),
             "uptime": up_txt,
             "uptime_seconds": int(up_sec),
             "load": read_load(),

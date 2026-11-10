@@ -29,7 +29,14 @@ case "$ROLE" in
 esac
 
 say() { printf '%s\n' "$*"; }
-# 确认框：回车算 y，只有明确 n/no 才算否
+# 确认框（默认 y）：回车算 y，只有明确 n/no 才算否
+# 确认框（默认 N）：回车算 n，只有明确 y/yes 才算同意
+confirmn() {
+  printf '%s (y/N): ' "$1"
+  read -r _ans || true
+  case "$_ans" in y|Y|yes|YES|Yes) return 0 ;; *) return 1 ;; esac
+}
+
 confirm() {
   printf '%s (Y/n): ' "$1"
   read -r _ans || true
@@ -50,7 +57,7 @@ find_src() {
   fi
   command -v tar >/dev/null || { say "缺 tar"; exit 1; }
   TMP=$(mktemp -d)
-  for URL in "$TARBALL" "$MIRROR"; do
+  for URL in "$MIRROR" "$TARBALL"; do
     [ -n "$URL" ] || continue
     say "下载源码包：$URL"
     if command -v curl >/dev/null; then
@@ -178,129 +185,109 @@ if [ "$ROLE" = "server" ]; then
   find_src
   install_files
 
-  askdefault "面板监听端口（只给本机 nginx 用）" "8080" HTTP_PORT
-  case "$HTTP_PORT" in *[!0-9]*|"") say "端口要是数字"; exit 1;; esac
+  ask "监听方式：unix socket（推荐，不占端口，nginx 直接 proxy_pass 到文件）还是 TCP 端口？(u/t) [u]: " BINDMODE
+  case "$BINDMODE" in
+    t|T|tcp|TCP)
+      askdefault "面板监听端口（只给本机 nginx 用）" "8080" HTTP_PORT
+      case "$HTTP_PORT" in *[!0-9]*|"") say "端口要是数字"; exit 1;; esac
+      BIND_ADDR="127.0.0.1" ;;
+    *)
+      HTTP_PORT=""
+      BIND_ADDR="unix:$PREFIX/run/http.sock" ;;
+  esac
   askdefault "探针上报端口" "35601" TCP_PORT
   case "$TCP_PORT" in *[!0-9]*|"") say "端口要是数字"; exit 1;; esac
-  ask "域名（没有就回车，跳过 nginx/证书）: " DOMAIN
-  if [ -n "$DOMAIN" ]; then
-    ask "这个域名用 IPv4 还是 IPv6？(4/6) [4]: " IPVER
-    [ -n "$IPVER" ] || IPVER=4
-    case "$IPVER" in 4|6) ;; *) say "只支持 4 或 6"; exit 1;; esac
-    ask "证书邮箱（不签 HTTPS 就回车）: " EMAIL
-  fi
 
   cat > "$PREFIX/server.json" <<JSON
 {
   "token": "",
   "users": [],
-  "bind": "127.0.0.1",
+  "bind": "$BIND_ADDR",
   "tcp_port": $TCP_PORT,
-  "http_port": $HTTP_PORT,
+  "http_port": ${HTTP_PORT:-0},
   "web_root": "$WEBROOT",
   "stale_seconds": 30
 }
 JSON
   chmod 600 "$PREFIX/server.json"
-
   svc deploy/zstat-server.service zstat-server
-  say "面板已启动（127.0.0.1:$HTTP_PORT，探针端口 $TCP_PORT）"
-
-  if [ -n "$DOMAIN" ]; then
+  if [ -n "$HTTP_PORT" ]; then
+    say "面板已启动（127.0.0.1:$HTTP_PORT，探针端口 $TCP_PORT）"
+  else
+    say "面板已启动（socket：$PREFIX/run/http.sock，探针端口 $TCP_PORT）"
+  fi
+  say ""
+  if confirmn "要我帮你装/配 nginx 吗？（本机已有就只加一个 conf.d/zstat.conf，不动你现有站点）"; then
     if ! command -v nginx >/dev/null; then
-      say "装 nginx…"
-      (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx && mark_installed nginx) || say "nginx 装失败，请手动装"
-    fi
-    if command -v nginx >/dev/null; then
-      if [ "$IPVER" = "6" ]; then LISTEN='    listen [::]:80 ipv6only=on;'; else LISTEN='    listen 80;'; fi
-      cat > /etc/nginx/sites-available/zstat <<NGINX
-server {
-$LISTEN
-    server_name $DOMAIN;
-    root $WEBROOT;
-    index index.html;
-
-    location /api/ {
-        proxy_pass http://127.0.0.1:$HTTP_PORT;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-    }
-
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-}
-NGINX
-      mkdir -p /etc/nginx/sites-enabled
-      ln -sf /etc/nginx/sites-available/zstat /etc/nginx/sites-enabled/zstat
-      nginx -t && systemctl reload nginx && say "nginx 已配好：http://$DOMAIN"
-
-      if [ -n "$EMAIL" ]; then
-        MYIP=$(python3 - "${IPVER:-4}" <<'PY2'
-import socket, sys
-ver = sys.argv[1]
-try:
-    if ver == "6":
-        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM); s.settimeout(3)
-        s.connect(("2606:4700:4700::1111", 80))
-    else:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3)
-        s.connect(("1.1.1.1", 80))
-    print(s.getsockname()[0]); s.close()
-except OSError:
-    print("")
-PY2
-)
-        DOMIP=$(python3 - "$DOMAIN" "${IPVER:-4}" <<'PY2'
-import socket, sys
-name, ver = sys.argv[1], sys.argv[2]
-try:
-    if ver == "6":
-        infos = socket.getaddrinfo(name, None, socket.AF_INET6)
-        print(infos[0][4][0] if infos else "")
-    else:
-        print(socket.gethostbyname(name))
-except OSError:
-    print("")
-PY2
-)
-        case "$MYIP" in
-          10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|"")
-            say "$DOMAIN 解析到：${DOMIP:-解析不到}（本机在 NAT 后面，跳过 IP 比对）"; MYIP="" ;;
-          *) say "本机公网 IP：$MYIP　$DOMAIN 解析到：${DOMIP:-解析不到}" ;;
-        esac
-        if [ -z "$DOMIP" ]; then
-          say "！！域名解析不到，签名一定失败；先做解析，再跑：certbot --nginx -d $DOMAIN --agree-tos -m $EMAIL --redirect"
-          SKIP_CERT=1
-        elif [ -n "$MYIP" ] && [ "$DOMIP" != "$MYIP" ]; then
-          say "！！$DOMAIN 现在指向 $DOMIP，不是这台机器（$MYIP）。"
-          ask "还是要试吗？(y/N): " GO
-          [ "$GO" = "y" ] || SKIP_CERT=1
-        fi
-        if [ -z "$SKIP_CERT" ]; then
-          if ! command -v certbot >/dev/null; then
-            say "装 certbot…"
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx \
-            && mark_installed certbot && mark_installed python3-certbot-nginx || say "certbot 装失败"
-          fi
-          if command -v certbot >/dev/null; then
-            if certbot --nginx -d "$DOMAIN" --agree-tos -m "$EMAIL" --redirect -n; then
-              say "证书已签。验证续期链路…"
-              certbot renew --dry-run 2>&1 | tail -3 || say "dry-run 没过，留意 certbot.timer"
-              systemctl list-timers certbot.timer --no-pager 2>/dev/null | head -3
-            else
-              say "证书申请失败，站点仍在 http；排错后再跑：certbot --nginx -d $DOMAIN"
-            fi
-          fi
-        fi
-      else
-        say "没给邮箱，跳过 HTTPS；以后可以跑：certbot --nginx -d $DOMAIN"
+      if confirm "本机没有 nginx，现在装一个？"; then
+        DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx && mark_installed nginx || say "nginx 装失败"
       fi
     fi
+    if command -v nginx >/dev/null; then
+      ask "域名（可空，空就按端口/IP 访问）: " NDOMAIN
+      if [ -n "$HTTP_PORT" ]; then PASSLINE="proxy_pass http://127.0.0.1:$HTTP_PORT;"; else PASSLINE="proxy_pass http://unix:$PREFIX/run/http.sock:;"; fi
+      mkdir -p /etc/nginx/conf.d
+      {
+        echo "server {"
+        echo "    listen 80;"
+        [ -n "$NDOMAIN" ] && echo "    server_name $NDOMAIN;"
+        echo "    root $WEBROOT;"
+        echo "    index index.html;"
+        echo ""
+        echo "    location /api/ {"
+        echo "        $PASSLINE"
+        echo "        proxy_set_header Host \$host;"
+        echo "    }"
+        echo ""
+        echo "    location / { try_files \$uri \$uri/ /index.html; }"
+        echo "}"
+      } > /etc/nginx/conf.d/zstat.conf
+      if nginx -t >/dev/null 2>&1; then
+        systemctl reload nginx
+        say "nginx 已配好：/etc/nginx/conf.d/zstat.conf${NDOMAIN:+　http://$NDOMAIN}"
+        say "要 HTTPS：certbot --nginx -d $NDOMAIN"
+      else
+        rm -f /etc/nginx/conf.d/zstat.conf
+        say "nginx -t 没过，我把 zstat.conf 删了，你的 nginx 没动："
+        nginx -t 2>&1 | tail -3
+      fi
+    else
+      say "没有 nginx，跳过。下面这段自己反代。"
+    fi
   else
-    say "没给域名：只在本机 $HTTP_PORT 提供，请自己用 nginx 反代到 $WEBROOT"
+    say "好，不碰 nginx。下面这些你自己反代。"
   fi
 
+  say ""
+  say "静态目录：$WEBROOT"
+  say ""
+  say "  静态目录：$WEBROOT"
+  if [ -n "$HTTP_PORT" ]; then say "  API 地址：127.0.0.1:$HTTP_PORT"; else say "  API 地址：unix:$PREFIX/run/http.sock"; fi
+  say ""
+  say "  （只反代静态目录也行：$WEBROOT 里会自动写 stats.json，前端读不到 /api 就改读它）"
+  say ""
+  say "  nginx 大概这么写："
+  if [ -n "$HTTP_PORT" ]; then
+    say "  # 静态文件 + API（TCP 端口）"
+    say "  root $WEBROOT;"
+    say "  location /api/ {"
+    say "      proxy_pass http://127.0.0.1:$HTTP_PORT;"
+    say "      proxy_set_header Host \$host;"
+    say "  }"
+    say "  location / { try_files \$uri \$uri/ /index.html; }"
+  else
+    say "  # 静态文件 + API（unix socket，不占端口）"
+    say "  root $WEBROOT;"
+    say "  location /api/ {"
+    say "      proxy_pass http://unix:$PREFIX/run/http.sock:;"
+    say "      proxy_set_header Host \$host;"
+    say "  }"
+    say "  location / { try_files \$uri \$uri/ /index.html; }"
+    say ""
+    say "  socket 文件权限是 666，nginx 能直接写；nginx 要是有 user 限制，确认 /run 目录可读。"
+  fi
+  say ""
+  say "要 HTTPS 就自己跑：certbot --nginx -d 你的域名"
   say ""
   say "下一步：给每台机器建账号"
   say "  sh $PREFIX/user.sh add hk1"
@@ -335,6 +322,11 @@ PY2
   ask "密码: " CPASS
   ask "机房/位置（如 Hong Kong，可空）: " CLOC
   ask "到期日 YYYY-MM-DD（可空）: " CEXP
+  CCYCLE=""
+  if [ -n "$CEXP" ]; then
+    ask "月付还是年付？(m/y) [m]: " CCYCLE
+    case "$CCYCLE" in y|Y|year|年|年付) CCYCLE=year ;; *) CCYCLE=month ;; esac
+  fi
 
   cat > "$PREFIX/agent.json" <<JSON
 {
@@ -345,6 +337,7 @@ PY2
   "name": "$CNAME",
   "location": "$CLOC",
   "expire": "$CEXP",
+  "cycle": "$CCYCLE",
   "interval": 5
 }
 JSON
@@ -359,23 +352,31 @@ fi
 
 # ---------------- 节点账号 ----------------
 node_list() {
-  python3 - "$PREFIX/server.json" <<'PY2'
+  python3 - "$PREFIX/server.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 us = d.get("users") or []
 if not us:
     print("（还没有节点账号）")
 else:
-    print("%-4s %-14s %s" % ("序号", "账号", "密码"))
+    print("%-4s %-14s %-14s %-11s %s" % ("序号", "账号", "密码", "到期", "周期"))
     for i, u in enumerate(us, 1):
-        print("%-4s %-14s %s" % (i, u.get("user", ""), u.get("password", "")))
-PY2
+        print("%-4s %-14s %-14s %-11s %s" % (
+            i, u.get("user", ""), u.get("password", ""),
+            u.get("expire") or "-",
+            "年付" if u.get("cycle") == "year" else ("月付" if u.get("cycle") == "month" else "-")))
+PY
 }
 
 node_add() {
   ask "新节点账号（英文，如 hk2）: " NNAME
   [ -n "$NNAME" ] || { say "没填，算了"; return; }
-  sh "$PREFIX/user.sh" add "$NNAME" | sed -n '1,3p'
+  ask "到期日 YYYY-MM-DD（可空）: " NEXP
+  NCP=""
+  if [ -n "$NEXP" ]; then
+    ask "月付还是年付？(m/y) [m]: " NCP
+  fi
+  sh "$PREFIX/user.sh" add "$NNAME" "" "$NCP" "$NEXP" | sed -n '1,4p'
 }
 
 node_del() {
@@ -398,6 +399,23 @@ PY2
   fi
 }
 
+node_renew() {
+  ask "要续期哪个序号: " NIDX
+  NAME=$(python3 - "$PREFIX/server.json" "$NIDX" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+us = d.get("users") or []
+try:
+    print(us[int(sys.argv[2]) - 1]["user"])
+except Exception:
+    print("")
+PY
+)
+  [ -n "$NAME" ] || { say "序号不对"; return; }
+  ask "月付还是年付？(m/y，回车沿用原来的): " CYC
+  sh "$PREFIX/user.sh" renew "$NAME" "$CYC" | tail -2
+}
+
 nodes() {
   if [ ! -f "$PREFIX/server.json" ]; then
     say "这台机器上没装面板，没有节点账号可管。"
@@ -408,10 +426,11 @@ nodes() {
     say "---- 节点账号 ----"
     node_list
     say ""
-    ask "a 添加 / d 删除 / 回车返回: " NACT
+    ask "a 添加 / d 删除 / r 续期 / 回车返回: " NACT
     case "$NACT" in
       a|A) node_add ;;
       d|D) node_del ;;
+      r|R) node_renew ;;
       *) return ;;
     esac
   done

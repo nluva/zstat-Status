@@ -11,6 +11,7 @@
 """
 import asyncio
 import json
+import socket
 import time
 import os
 import threading
@@ -22,6 +23,7 @@ CONF = os.path.join(BASE, "server.json")
 RUN = os.path.join(BASE, "run")
 os.makedirs(RUN, exist_ok=True)
 STATS = os.path.join(RUN, "stats.json")
+WEBSTATS = os.path.join(BASE, "web", "stats.json")
 
 
 def load_conf():
@@ -56,14 +58,40 @@ LOCK = threading.Lock()
 LAST_WRITE = [0.0]
 
 
+def snapshot():
+    """给前端用的快照：算好 age / stale，别让静态文件版本显示成永远在线。"""
+    now = time.time()
+    stale = float(CONF_DATA.get("stale_seconds", 30))
+    out = []
+    with LOCK:
+        for s in SERVERS.values():
+            item = {k: v for k, v in s.items() if not k.startswith("_")}
+            if "online4" in s:
+                item["online4"] = bool(s["online4"])
+            if "online6" in s:
+                item["online6"] = bool(s["online6"])
+            item["age"] = int(now - s.get("_ts", 0))
+            if item["age"] > stale:
+                item["online4"] = False
+                item["online6"] = False
+                item["stale"] = True
+            else:
+                item["stale"] = False
+            out.append(item)
+    return out
+
+
 def save_stats():
     """把内存里的状态落盘（原子替换，避免前端读到半截文件）。"""
-    with LOCK:
-        data = {"servers": list(SERVERS.values()), "updated": int(__import__("time").time())}
-    tmp = STATS + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
-    os.replace(tmp, STATS)
+    data = {"servers": snapshot(), "updated": int(time.time())}
+    for path in (STATS, WEBSTATS):
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, path)
+        except OSError:
+            pass
 
 
 def auth_ok(msg):
@@ -80,9 +108,23 @@ def auth_ok(msg):
     return bool(tok) and msg.get("token") == tok
 
 
+def apply_account(new):
+    """账号里配了到期日/周期就以面板为准（这样在面板里续期才不会被探针覆盖）。"""
+    refresh_conf()
+    for u in CONF_DATA.get("users") or []:
+        if u.get("user") == new.get("user") or (u.get("name") and u.get("name") == new.get("name")):
+            if u.get("expire"):
+                new["type"] = u["expire"]
+            if u.get("cycle"):
+                new["cycle"] = u["cycle"]
+            break
+    return new
+
+
 def merge(old, new):
     """新上报整体覆盖旧值；速率由 agent 自己按自己的采样间隔算好，这里不重算。"""
     new["_ts"] = time.time()
+    apply_account(new)
     return new
 
 
@@ -137,25 +179,7 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path in ("/api/servers", "/api/servers/"):
-            now = time.time()
-            stale = float(CONF_DATA.get("stale_seconds", 30))
-            with LOCK:
-                snap = []
-                for s in SERVERS.values():
-                    item = {k: v for k, v in s.items() if not k.startswith("_")}
-                    if "online4" in s:
-                        item["online4"] = bool(s["online4"])
-                    if "online6" in s:
-                        item["online6"] = bool(s["online6"])
-                    item["age"] = int(now - s.get("_ts", 0))
-                    # 超过 stale 秒没上报 → 判定离线，别让网页一直显示运行中
-                    if item["age"] > stale:
-                        item["online4"] = False
-                        item["online6"] = False
-                        item["stale"] = True
-                    else:
-                        item["stale"] = False
-                    snap.append(item)
+            snap = snapshot()
             body = json.dumps(snap, ensure_ascii=False).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -180,8 +204,33 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 
+class UnixHTTPServer(ThreadingHTTPServer):
+    """监听 unix socket：不用占端口，nginx 直接 proxy_pass 到 socket 文件。"""
+    address_family = socket.AF_UNIX
+
+    def server_bind(self):
+        try:
+            os.unlink(self.server_address)
+        except OSError:
+            pass
+        self.socket.bind(self.server_address)
+        try:
+            os.chmod(self.server_address, 0o666)
+        except OSError:
+            pass
+
+    def server_name(self):
+        return "unix"
+
+
 def start_http():
-    srv = ThreadingHTTPServer((CONF_DATA.get("bind", "0.0.0.0"), CONF_DATA["http_port"]), Handler)
+    bind = str(CONF_DATA.get("bind", "0.0.0.0"))
+    if bind.startswith("unix:"):
+        path = bind[5:]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        srv = UnixHTTPServer(path, Handler)
+    else:
+        srv = ThreadingHTTPServer((bind, CONF_DATA["http_port"]), Handler)
     srv.serve_forever()
 
 

@@ -58,12 +58,14 @@ function render(data){
     const state = fresh ? 'on' : 'off';
     const stateText = fresh ? '运行中' : '失联中';
     const dl = daysLeft(s.type);
+    const yearly = (s.cycle || '').toLowerCase().startsWith('y') || s.cycle === 'year';
+    const warnAt = yearly ? 30 : 7;   // 年付 30 天内变红，月付 7 天内变红
     const ram = pct(s.memory_used, s.memory_total);
     const rom = pct(s.hdd_used, s.hdd_total);
     return `<tr>
       <td class="c-status" data-k="状态"><span class="state ${state}" title="最后上报 ${age} 秒前"><i class="dot"></i>${stateText}</span></td>
       <td class="c-name" data-k="节点"><div class="name">${esc(s.name)}</div><div class="loc">${esc(s.location||'')}</div></td>
-      <td class="c-date" data-k="到期"><span class="date ${dl !== null && dl <= 30 ? 'warn':''}">${s.type||'—'}</span><span class="loc">${dl === null ? '' : dl < 0 ? '已过期' : '剩 ' + dl + ' 天'}</span></td>
+      <td class="c-date" data-k="到期"><span class="date ${dl !== null && dl <= warnAt ? 'warn':''}">${s.type||'—'}</span><span class="loc">${dl === null ? '' : dl < 0 ? '已过期' : '剩 ' + dl + ' 天 · ' + (yearly ? '年付' : '月付')}</span></td>
       <td class="c-uptime" data-k="在线"><span class="mono">${s.uptime||'—'}</span></td>
       <td class="c-load" data-k="负载"><span class="mono">${num(s.load).toFixed(2)}</span></td>
       <td class="c-net" data-k="网络"><span class="mono">↓ ${fmtBytes(num(s.network_rx))}/s &nbsp; ↑ ${fmtBytes(num(s.network_tx))}/s</span></td>
@@ -82,11 +84,19 @@ function render(data){
     `<span class="chip off">失联 <b>${total - live}</b></span>`;
 }
 
-async function load(){
+async function fetchData(){
   try{
     const r = await fetch(ENDPOINT + '?t=' + Date.now(), {cache:'no-store'});
-    if(!r.ok) throw new Error('HTTP ' + r.status);
-    const data = await r.json();
+    if (r.ok) return await r.json();
+  }catch(e){ /* 只反代静态目录时没有 /api，走下面的 stats.json */ }
+  const r2 = await fetch('stats.json?t=' + Date.now(), {cache:'no-store'});
+  if (!r2.ok) throw new Error('没有数据源');
+  return await r2.json();
+}
+
+async function load(){
+  try{
+    const data = await fetchData();
     render(data);
     document.querySelector('#updated').textContent = '最后更新 ' + new Date().toLocaleTimeString('zh-CN');
   }catch(e){
@@ -94,6 +104,5 @@ async function load(){
   }
 }
 
-document.querySelector('#refresh').onclick = load;
 load();
 setInterval(load, 5000);

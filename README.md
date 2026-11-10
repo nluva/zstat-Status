@@ -34,7 +34,7 @@ bash status.sh stop
 bash status.sh restart
 bash status.sh log         # 最近 40 行日志
 bash status.sh u           # 卸载（只问卸哪个 + 要不要连软件一起卸）
-bash status.sh n           # 节点账号：看列表 / 添加 / 删除
+bash status.sh n           # 节点账号：看列表 / 添加 / 删除 / 续期
 ```
 
 `start/stop/restart` 会**把这台机器上装过的 zstat 服务都管一遍**（只装了探针就只管探针）。
@@ -75,4 +75,11 @@ bash status.sh u
 
 ## License
 
-MIT
+MIT## 装的时候问一句 nginx
+
+安完面板会问：**「要我帮你装/配 nginx 吗？(y/N)」**（默认 N，回车就是不碰）
+
+- **答 y**：本机没有 nginx 就问要不要装；然后问一句域名（可空），只新增 `/etc/nginx/conf.d/zstat.conf`，`nginx -t` 通过才 reload；不通过会删掉这个文件并打印错误
+- **答 n（默认）**：不装、不写配置，只打印静态目录和反代片段，你自己配
+
+
