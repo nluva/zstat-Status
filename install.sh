@@ -16,14 +16,23 @@ PREFIX="${ZSTAT_PREFIX:-/usr/local/ServerStatus}"
 WEBROOT="$PREFIX/web"
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 ROLE="$1"
+ACTION=""
 case "$ROLE" in
-  s|S|server|Server) ROLE=server ;;
-  c|C|client|Client) ROLE=client ;;
+  s|S|server)    ROLE=server ;;
+  c|C|client)    ROLE=client ;;
+  u|U|rm|remove|uninstall|del) ROLE=uninstall ;;
+  start|stop|restart|status|log|logs) ACTION="$ROLE"; ROLE=manage ;;
   "") ;;
-  *) echo "用法: bash status.sh [s|c]"; exit 1 ;;
+  *) echo "用法: bash status.sh [s|c|u|start|stop|restart|status|log]"; exit 1 ;;
 esac
 
 say() { printf '%s\n' "$*"; }
+# 确认框：回车算 y，只有明确 n/no 才算否
+confirm() {
+  printf '%s (Y/n): ' "$1"
+  read -r _ans || true
+  case "$_ans" in n|N|no|NO|No) return 1 ;; *) return 0 ;; esac
+}
 ask() { printf '%s' "$1"; read -r "$2" || true; }
 askdefault() { printf '%s [%s]: ' "$1" "$2"; read -r "$3" || true; [ -n "$(eval echo \$$3)" ] || eval "$3='$2'"; }
 
@@ -53,14 +62,75 @@ find_src() {
 }
 
 if [ -z "$ROLE" ]; then
-  say "装什么？"
-  say "  1) 面板 server（收所有探针的数据 + 网页）"
-  say "  2) 探针 client（把这台机器上报给面板）"
-  ask "选 1 或 2: " PICK
-  [ "$PICK" = "1" ] && ROLE=server || ROLE=client
+  say "要做什么？"
+  say "  1) 装面板 server（收所有探针的数据 + 网页）"
+  say "  2) 装探针 client（把这台机器上报给面板）"
+  say "  3) 卸载"
+  say "  4) 启动   5) 停止   6) 重启   7) 看状态"
+  ask "选 1-7: " PICK
+  case "$PICK" in
+    1) ROLE=server ;;
+    2) ROLE=client ;;
+    3) ROLE=uninstall ;;
+    4) ROLE=manage; ACTION=start ;;
+    5) ROLE=manage; ACTION=stop ;;
+    6) ROLE=manage; ACTION=restart ;;
+    7) ROLE=manage; ACTION=status ;;
+    *) say "只认 1-7"; exit 1 ;;
+  esac
 fi
 
-find_src
+# find_src 放到真正安装的时候再调（管理/卸载不需要源码）
+
+# ---------- 服务管理 ----------
+svc_list() {
+  # 输出这台机器上已有的 zstat 服务（末尾 true：没有服务时不要让 set -e 退出）
+  [ -f /etc/systemd/system/zstat-server.service ] && echo zstat-server
+  [ -f /etc/systemd/system/zstat-agent.service ] && echo zstat-agent
+  return 0
+}
+
+manage() {
+  SVCS=$(svc_list)
+  if [ -z "$SVCS" ]; then
+    say "这台机器上没装 zstat 服务。先装：bash status.sh s 或 bash status.sh c"
+    exit 0
+  fi
+  case "$ACTION" in
+    start|stop|restart)
+      for s in $SVCS; do
+        systemctl "$ACTION" "$s" >/dev/null 2>&1 || true
+        STATE=$(systemctl is-active "$s" 2>/dev/null || true)
+        say "$s -> ${STATE:-未知}"
+      done
+      ;;
+    status)
+      for s in $SVCS; do
+        say "---- $s ----"
+        systemctl status "$s" --no-pager -n 5 2>&1 | head -12
+      done
+      say "网页端口：$(python3 - "$PREFIX/server.json" <<'PY2' 2>/dev/null || echo '?'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(d.get("http_port","?"))
+PY2
+)"
+      ;;
+    log|logs)
+      for s in $SVCS; do
+        say "---- $s（最近 40 行）----"
+        journalctl -u "$s" -n 40 --no-pager 2>&1 | tail -40
+      done
+      ;;
+  esac
+  exit 0
+}
+
+mark_installed() {
+  # 记录脚本自己装的软件包，卸载时才能"连它们一起删"
+  mkdir -p "$PREFIX"
+  printf '%s\n' "$1" >> "$PREFIX/.zstat-installed" 2>/dev/null || true
+}
 
 install_files() {
   mkdir -p "$PREFIX"
@@ -84,6 +154,7 @@ svc() {   # svc 文件 名字
 
 # ---------------- 面板 ----------------
 if [ "$ROLE" = "server" ]; then
+  find_src
   install_files
 
   askdefault "面板监听端口（只给本机 nginx 用）" "8080" HTTP_PORT
@@ -117,7 +188,7 @@ JSON
   if [ -n "$DOMAIN" ]; then
     if ! command -v nginx >/dev/null; then
       say "装 nginx…"
-      (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx) || say "nginx 装失败，请手动装"
+      (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx && mark_installed nginx) || say "nginx 装失败，请手动装"
     fi
     if command -v nginx >/dev/null; then
       if [ "$IPVER" = "6" ]; then LISTEN='    listen [::]:80 ipv6only=on;'; else LISTEN='    listen 80;'; fi
@@ -188,7 +259,8 @@ PY2
         if [ -z "$SKIP_CERT" ]; then
           if ! command -v certbot >/dev/null; then
             say "装 certbot…"
-            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx || say "certbot 装失败"
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq certbot python3-certbot-nginx \
+            && mark_installed certbot && mark_installed python3-certbot-nginx || say "certbot 装失败"
           fi
           if command -v certbot >/dev/null; then
             if certbot --nginx -d "$DOMAIN" --agree-tos -m "$EMAIL" --redirect -n; then
@@ -216,6 +288,7 @@ fi
 
 # ---------------- 探针 ----------------
 if [ "$ROLE" = "client" ]; then
+  find_src
   install_files
 
   ask "节点名称（面板上显示的名字，如 HK-1）: " CNAME
@@ -246,4 +319,84 @@ JSON
     sleep 3
     systemctl is-active zstat-agent >/dev/null && say "探针已启动，正在上报到 $CSERVER" || say "探针没起来，看：journalctl -u zstat-agent -n 30"
   fi
+fi
+
+# ---------------- manage ----------------
+if [ "$ROLE" = "manage" ]; then
+  manage
+fi
+
+# ---------------- uninstall ----------------
+if [ "$ROLE" = "uninstall" ]; then
+  HAVE_SERVER=0; HAVE_AGENT=0
+  [ -f /etc/systemd/system/zstat-server.service ] && HAVE_SERVER=1 || true
+  [ -f /etc/systemd/system/zstat-agent.service ] && HAVE_AGENT=1 || true
+  if [ "$HAVE_SERVER" = 0 ] && [ "$HAVE_AGENT" = 0 ] && [ ! -d "$PREFIX" ]; then
+    say "这台机器上没找到 zstat，应该没装过。"
+    exit 0
+  fi
+
+  ask "卸哪个？面板填 1，探针填 2，两个都卸填 3: " WHICH
+  case "$WHICH" in 1|2|3) ;; *) say "只认 1、2、3"; exit 1 ;; esac
+
+  # 1) 停服务、删单元
+  if [ "$WHICH" = "1" ] || [ "$WHICH" = "3" ]; then
+    if [ "$HAVE_SERVER" = 1 ]; then
+      systemctl disable --now zstat-server >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/zstat-server.service
+    fi
+    say "面板服务已停"
+  fi
+  if [ "$WHICH" = "2" ] || [ "$WHICH" = "3" ]; then
+    if [ "$HAVE_AGENT" = 1 ]; then
+      systemctl disable --now zstat-agent >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/zstat-agent.service
+    fi
+    say "探针服务已停"
+  fi
+  systemctl daemon-reload >/dev/null 2>&1 || true
+
+  # 2) nginx 站点 / 证书 / 目录：卸面板就一起清，不再多问
+  if [ "$WHICH" = "1" ] || [ "$WHICH" = "3" ]; then
+    if [ -f /etc/nginx/sites-available/zstat ]; then
+      rm -f /etc/nginx/sites-enabled/zstat /etc/nginx/sites-available/zstat
+      command -v nginx >/dev/null && { nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true; }
+      say "nginx 里的 zstat 站点已删"
+    fi
+    for d in $(grep '^domain=' "$PREFIX/.zstat-installed" 2>/dev/null | sed 's/^domain=//'); do
+      if command -v certbot >/dev/null; then
+        certbot delete --cert-name "$d" -n >/dev/null 2>&1 && say "证书 $d 已删" || say "证书 $d 没删掉"
+      fi
+    done
+  fi
+
+  # 3) 软件：只问这一句
+  PKGS=""
+  if [ -f "$PREFIX/.zstat-installed" ]; then
+    PKGS=$(grep -v '^domain=' "$PREFIX/.zstat-installed" | sort -u | tr '\n' ' ')
+  fi
+  if [ -n "$PKGS" ]; then
+    say ""
+    say "这个脚本还装过：$PKGS"
+    if confirm "连它们一起卸载吗？"; then
+      for p in $PKGS; do
+        if [ -n "$ZSTAT_PREFIX" ]; then
+          say "（测试模式：不真的卸载 $p）"
+        else
+          DEBIAN_FRONTEND=noninteractive apt-get purge -y "$p" >/dev/null 2>&1 || say "$p 卸载失败"
+        fi
+      done
+      [ -z "$ZSTAT_PREFIX" ] && { apt-get autoremove -y >/dev/null 2>&1 || true; }
+      say "软件已卸载"
+    else
+      say "软件保留（nginx / certbot 没动）"
+    fi
+  fi
+
+  # 4) 程序目录：直接删
+  if [ -d "$PREFIX" ]; then
+    rm -rf "$PREFIX"
+    say "已删除 $PREFIX"
+  fi
+  say "卸载完成。"
 fi

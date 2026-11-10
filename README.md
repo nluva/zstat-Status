@@ -21,67 +21,33 @@ wget -O status.sh https://raw.githubusercontent.com/nluva/zstat-Status/main/inst
 bash status.sh c
 ```
 
-不带参数跑 `bash status.sh` 就是交互菜单，问你要装面板还是探针。
+不带参数跑 `bash status.sh` 就是交互菜单：装面板 / 装探针 / 卸载 / 启动 / 停止 / 重启 / 看状态。
 
-## 面板装的时候会问什么
-
-1. 面板监听端口（默认 `8080`，**只绑 127.0.0.1**，由 nginx 反代）
-2. 探针上报端口（默认 `35601`）
-3. **域名**（不填就只在本机提供，自己反代）
-4. 域名用 **IPv4 还是 IPv6**（选 6 时 nginx 写 `listen [::]:80 ipv6only=on`）
-5. 证书邮箱（填了就自动装 nginx、写 vhost、跑 `certbot --nginx` 签证书，签完自动 `renew --dry-run` 验一遍续期）
-
-装完会打印下一步：给节点建账号。
+## 日常管理
 
 ```sh
-sh /usr/local/ServerStatus/user.sh add hk1     # 生成随机密码并打印
-sh /usr/local/ServerStatus/user.sh list        # 看所有账号
-sh /usr/local/ServerStatus/user.sh del hk1     # 删
+bash status.sh status      # 看服务和状态（最近 5 行日志 + 网页端口）
+bash status.sh start
+bash status.sh stop
+bash status.sh restart
+bash status.sh log         # 最近 40 行日志
+bash status.sh u           # 卸载（会问卸面板还是探针，再问要不要删数据）
 ```
 
-## 探针装的时候会问什么
+`start/stop/restart` 会**把这台机器上装过的 zstat 服务都管一遍**（只装了探针就只管探针）。
 
-节点名称 → 面板地址 → 上报端口 → **账号** → **密码** → 机房位置 → 到期日。
-写进 `/usr/local/ServerStatus/agent.json`（600 权限），然后起 `zstat-agent`。
-
-## 认证
-
-每台探针一个**用户名 + 密码**（`server.json` 的 `users` 数组），不是全局共享 token。
-没配 `users` 时才回退到 `token` 字段。
-
-## 网页长什么样
-
-- 一行一台机器，单行紧凑，1280 宽能看十几台
-- 状态只有两个：**运行中** / **失联中**（超过 `stale_seconds` 没上报就算失联）
-- 到期日期自动算天数，30 天内变红
-- CPU / RAM / 硬盘是细进度条，**鼠标放上去**看细节：
-  - CPU：核心数 + 型号（`4 核 · Intel Xeon E5-2678 v3`）
-  - RAM：已用/总量 + SWAP 已用/总量
-  - 硬盘：已用/总量
-- 页面 **5 秒**自动刷新；手机上是卡片布局；跟随系统深色模式
-
-## 目录结构
-
-```
-server.py                 面板：TCP 收上报 + HTTP 出 API + 静态网页
-agent.py                  探针：读 /proc 采集并上报
-web/                      前端（index.html / style.css / app.js）
-user.sh                   账号管理
-deploy/*.service          systemd 单元
-tools/demo_feed.py        灌假数据看效果的演示脚本（正式别跑）
-install.sh                安装脚本（就是 status.sh）
-```
-
-安装后统一在 `/usr/local/ServerStatus/`，systemd 单元是 `zstat-server` / `zstat-agent`。
-
-## 常用命令
+卸载只问两句（**回车都是 y**）：
 
 ```sh
-systemctl status zstat-server
-systemctl restart zstat-agent
-journalctl -u zstat-server -n 50
-curl -s http://127.0.0.1:8080/api/servers | head -c 300
+bash status.sh u
+# 卸哪个？面板填 1，探针填 2，两个都卸填 3: 1
+# 这个脚本还装过：certbot nginx
+# 连它们一起卸载吗？ (Y/n):
 ```
+
+**不用多问，卸面板就自动清这些**：停服务 → 删 systemd 单元 → 删 nginx 里的 zstat 站点 → 删证书 → 删 `/usr/local/ServerStatus`。
+
+只有「要不要连 nginx / certbot 这些软件一起卸」需要你点头——因为那会影响这台机器上的其它站点。答 n 就只清 zstat 自己的东西。
 
 ## 数据从哪来
 
