@@ -11,6 +11,7 @@ set -e
 REPO="nluva/zstat-Status"
 BRANCH="main"
 TARBALL="https://github.com/$REPO/archive/refs/heads/$BRANCH.tar.gz"
+MIRROR="https://822229.xyz/dl/zstat-Status.tar.gz"
 
 PREFIX="${ZSTAT_PREFIX:-/usr/local/ServerStatus}"
 WEBROOT="$PREFIX/web"
@@ -48,19 +49,27 @@ find_src() {
   fi
   command -v tar >/dev/null || { say "缺 tar"; exit 1; }
   TMP=$(mktemp -d)
-  say "从 GitHub 下载源码包…"
-  if command -v curl >/dev/null; then
-    curl -fsSL "$TARBALL" -o "$TMP/src.tar.gz"
-  elif command -v wget >/dev/null; then
-    wget -q "$TARBALL" -O "$TMP/src.tar.gz"
-  else
-    say "缺 curl/wget"; exit 1
-  fi
-  tar xzf "$TMP/src.tar.gz" -C "$TMP"
-  SRC=$(ls -d "$TMP"/zstat-Status-* 2>/dev/null | head -1)
-  [ -n "$SRC" ] && [ -f "$SRC/server.py" ] || { say "源码包解压失败"; exit 1; }
+  for URL in "$TARBALL" "$MIRROR"; do
+    [ -n "$URL" ] || continue
+    say "下载源码包：$URL"
+    if command -v curl >/dev/null; then
+      curl -fsSL "$URL" -o "$TMP/src.tar.gz" || { say "  下载失败"; continue; }
+    else
+      wget -q "$URL" -O "$TMP/src.tar.gz" || { say "  下载失败"; continue; }
+    fi
+    rm -rf "$TMP"/x && mkdir -p "$TMP/x"
+    tar xzf "$TMP/src.tar.gz" -C "$TMP/x" || { say "  解压失败"; continue; }
+    SRC=$(ls -d "$TMP"/x/zstat-Status* 2>/dev/null | head -1)
+    [ -n "$SRC" ] || SRC=$(find "$TMP/x" -maxdepth 2 -name server.py -printf '%h\n' 2>/dev/null | head -1)
+    if [ -n "$SRC" ] && [ -f "$SRC/server.py" ] && [ -d "$SRC/web" ]; then
+      return
+    fi
+    say "  这个包里缺 web/ 目录，换下一个源"
+  done
+  say "源码拿不到（GitHub 上的包可能不完整）。"
+  say "手动办法：把 zstat-Status 整个目录传上来，进目录里跑 bash install.sh s"
+  exit 1
 }
-
 if [ -z "$ROLE" ]; then
   say "要做什么？"
   say "  1) 装面板 server（收所有探针的数据 + 网页）"
@@ -147,7 +156,8 @@ svc() {   # svc 文件 名字
     say "（测试模式：跳过 systemctl，文件在 $PREFIX）"
     return
   fi
-  sed "s#/opt/zstat#$PREFIX#g" "$SRC/$1" > "/etc/systemd/system/$2"
+  sed "s#/opt/zstat#$PREFIX#g" "$SRC/$1" > "/etc/systemd/system/$2.service"
+  [ -s "/etc/systemd/system/$2.service" ] || { say "写 systemd 单元失败：$SRC/$1 不存在？"; exit 1; }
   systemctl daemon-reload
   systemctl enable --now "$2"
 }
