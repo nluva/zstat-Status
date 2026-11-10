@@ -31,7 +31,8 @@ bash status.sh start
 bash status.sh stop
 bash status.sh restart
 bash status.sh log         # 最近 40 行日志
-bash status.sh u           # 卸载（会问卸面板还是探针，再问要不要删数据）
+bash status.sh u           # 卸载（只问卸哪个 + 要不要连软件一起卸）
+bash status.sh n           # 节点账号：看列表 / 添加 / 删除
 ```
 
 `start/stop/restart` 会**把这台机器上装过的 zstat 服务都管一遍**（只装了探针就只管探针）。

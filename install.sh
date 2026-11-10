@@ -23,6 +23,7 @@ case "$ROLE" in
   c|C|client)    ROLE=client ;;
   u|U|rm|remove|uninstall|del) ROLE=uninstall ;;
   start|stop|restart|status|log|logs) ACTION="$ROLE"; ROLE=manage ;;
+  n|node|nodes|account|accounts) ROLE=nodes ;;
   "") ;;
   *) echo "用法: bash status.sh [s|c|u|start|stop|restart|status|log]"; exit 1 ;;
 esac
@@ -76,6 +77,7 @@ if [ -z "$ROLE" ]; then
   say "  2) 装探针 client（把这台机器上报给面板）"
   say "  3) 卸载"
   say "  4) 启动   5) 停止   6) 重启   7) 看状态"
+  say "  8) 节点账号（看列表 / 加 / 删）"
   ask "选 1-7: " PICK
   case "$PICK" in
     1) ROLE=server ;;
@@ -85,6 +87,7 @@ if [ -z "$ROLE" ]; then
     5) ROLE=manage; ACTION=stop ;;
     6) ROLE=manage; ACTION=restart ;;
     7) ROLE=manage; ACTION=status ;;
+    8) ROLE=nodes ;;
     *) say "只认 1-7"; exit 1 ;;
   esac
 fi
@@ -331,9 +334,73 @@ JSON
   fi
 fi
 
+# ---------------- 节点账号 ----------------
+node_list() {
+  python3 - "$PREFIX/server.json" <<'PY2'
+import json, sys
+d = json.load(open(sys.argv[1]))
+us = d.get("users") or []
+if not us:
+    print("（还没有节点账号）")
+else:
+    print("%-4s %-14s %s" % ("序号", "账号", "密码"))
+    for i, u in enumerate(us, 1):
+        print("%-4s %-14s %s" % (i, u.get("user", ""), u.get("password", "")))
+PY2
+}
+
+node_add() {
+  ask "新节点账号（英文，如 hk2）: " NNAME
+  [ -n "$NNAME" ] || { say "没填，算了"; return; }
+  sh "$PREFIX/user.sh" add "$NNAME" | sed -n '1,3p'
+}
+
+node_del() {
+  ask "要删哪个序号: " NIDX
+  NAME=$(python3 - "$PREFIX/server.json" "$NIDX" <<'PY2'
+import json, sys
+d = json.load(open(sys.argv[1]))
+us = d.get("users") or []
+try:
+    i = int(sys.argv[2]) - 1
+    print(us[i]["user"])
+except Exception:
+    print("")
+PY2
+)
+  [ -n "$NAME" ] || { say "序号不对"; return; }
+  if confirm "确定删除账号 $NAME 吗（那台探针会连不上）"; then
+    sh "$PREFIX/user.sh" del "$NAME" >/dev/null 2>&1
+    say "已删除 $NAME"
+  fi
+}
+
+nodes() {
+  if [ ! -f "$PREFIX/server.json" ]; then
+    say "这台机器上没装面板，没有节点账号可管。"
+    return
+  fi
+  while :; do
+    say ""
+    say "---- 节点账号 ----"
+    node_list
+    say ""
+    ask "a 添加 / d 删除 / 回车返回: " NACT
+    case "$NACT" in
+      a|A) node_add ;;
+      d|D) node_del ;;
+      *) return ;;
+    esac
+  done
+}
+
 # ---------------- manage ----------------
 if [ "$ROLE" = "manage" ]; then
   manage
+fi
+
+if [ "$ROLE" = "nodes" ]; then
+  nodes
 fi
 
 # ---------------- uninstall ----------------
@@ -403,8 +470,19 @@ if [ "$ROLE" = "uninstall" ]; then
     fi
   fi
 
-  # 4) 程序目录：直接删
-  if [ -d "$PREFIX" ]; then
+  # 4) 程序目录：只卸面板时删；机器上还有别的角色就留着
+  if [ "$WHICH" = "2" ]; then
+    # 只卸探针：删掉探针配置，别的文件一个都不动
+    rm -f "$PREFIX/agent.json"
+    if [ -d "$PREFIX" ] && [ -n "$(ls -A "$PREFIX" 2>/dev/null)" ]; then
+      say "探针已卸载（只删了 agent.json，$PREFIX 里别的文件没动）"
+    else
+      rm -rf "$PREFIX"
+      say "已删除 $PREFIX"
+    fi
+  elif [ -f /etc/systemd/system/zstat-agent.service ]; then
+    say "面板已卸载（$PREFIX 里还有探针在用的文件，没删）"
+  elif [ -d "$PREFIX" ]; then
     rm -rf "$PREFIX"
     say "已删除 $PREFIX"
   fi
