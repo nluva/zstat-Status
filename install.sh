@@ -167,6 +167,14 @@ svc() {   # svc 文件 名字
 
 # ---------------- 面板 ----------------
 if [ "$ROLE" = "server" ]; then
+  if [ -f /etc/systemd/system/zstat-server.service ]; then
+    say "这台机器已经装了面板（zstat-server）。"
+    [ -f "$PREFIX/server.json" ] && say "  现有配置：$PREFIX/server.json（账号不会丢）"
+    if ! confirm "要覆盖重装吗？"; then
+      say "取消。要卸载请跑：bash status.sh u"
+      exit 0
+    fi
+  fi
   find_src
   install_files
 
@@ -301,6 +309,21 @@ fi
 
 # ---------------- 探针 ----------------
 if [ "$ROLE" = "client" ]; then
+  if [ -f /etc/systemd/system/zstat-agent.service ]; then
+    say "这台机器已经装了探针（zstat-agent）。"
+    if [ -f "$PREFIX/agent.json" ]; then
+      python3 - "$PREFIX/agent.json" <<'PY2' 2>/dev/null || true
+import json,sys
+d=json.load(open(sys.argv[1]))
+host = d.get("server") or d.get("host") or d.get("panel") or "?"
+print("  当前节点：%s → %s:%s" % (d.get("name","?"), host, d.get("port","?")))
+PY2
+    fi
+    if ! confirm "要覆盖重装吗？"; then
+      say "取消。要卸载请跑：bash status.sh u"
+      exit 0
+    fi
+  fi
   find_src
   install_files
 

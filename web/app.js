@@ -43,6 +43,13 @@ function daysLeft(dateStr){
 function render(data){
   const servers = Array.isArray(data) ? data : (data.servers || []);
   const tbody = document.querySelector('#tbl tbody');
+  if (!servers.length){
+    tbody.innerHTML = '<tr class="empty"><td colspan="10">还没有节点上报。' +
+      '装一台探针（<code>bash status.sh c</code>）就会出现在这里——' +
+      '添加账号只是发通行证，不代表已经有机器。</td></tr>';
+    document.querySelector('#chips').innerHTML = '<span class="chip">节点 0</span>';
+    return;
+  }
   tbody.innerHTML = servers.map(s => {
     const hasFlags = ('online4' in s) || ('online6' in s);
     const reachable = hasFlags ? !!(s.online4 || s.online6) : true;

@@ -35,6 +35,22 @@ def load_conf():
 
 
 CONF_DATA = load_conf()
+CONF_MTIME = [os.path.getmtime(CONF) if os.path.exists(CONF) else 0]
+
+
+def refresh_conf():
+    """server.json 变了就重新读，不用重启服务（改账号后立即生效）。"""
+    try:
+        m = os.path.getmtime(CONF)
+    except OSError:
+        return
+    if m == CONF_MTIME[0]:
+        return
+    CONF_MTIME[0] = m
+    try:
+        CONF_DATA.update(load_conf())
+    except Exception:
+        pass
 SERVERS = {}            # name -> 最新一条上报（dict）
 LOCK = threading.Lock()
 LAST_WRITE = [0.0]
@@ -52,6 +68,7 @@ def save_stats():
 
 def auth_ok(msg):
     """两种认证：配了 users 就按「用户名+密码」，否则用共享 token。"""
+    refresh_conf()
     users = CONF_DATA.get("users") or []
     if users:
         for u in users:

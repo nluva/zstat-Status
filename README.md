@@ -21,7 +21,9 @@ wget -O status.sh https://raw.githubusercontent.com/nluva/zstat-Status/main/inst
 bash status.sh c
 ```
 
-不带参数跑 `bash status.sh` 就是交互菜单：装面板 / 装探针 / 卸载 / 启动 / 停止 / 重启 / 看状态。
+不带参数跑 `bash status.sh` 就是交互菜单：装面板 / 装探针 / 卸载 / 启动 / 停止 / 重启 / 看状态 / 节点账号。
+
+装之前会先检查：这台机器**已经装过面板/探针**的话，会打印现有配置并问「要覆盖重装吗」，答 n 就直接退出，不会把原来的东西弄坏。
 
 ## 日常管理
 
