@@ -1,79 +1,109 @@
-# zstat · 自己写的探针
+# zstat
 
-一个能跑的最小可用版：**面板收数据 + 探针上报 + 网页展示**，全部 Python 3 标准库，不装第三方包。
+一个能自己跑起来的探针系统：**面板收数据 + 探针上报 + 网页展示**。
+纯 Python 3 标准库，不装任何第三方包，不用 `docker`，不用数据库。
 
-## 长什么样
+> 起因：原来那套 `ServerStatus-Hotaru` 的 `status.sh` 在新系统上装不动，网页也旧了。所以重写了一套，功能对齐常用的那几样，代码量小到能一口气读完。
 
-- 面板（服务端）：一个 TCP 端口收上报，一个 HTTP 端口给网页和 API
-- 探针（被控机）：读 `/proc` 拿 CPU/内存/硬盘/网卡/开机时长，每 5 秒上报一次
-- 网页：状态胶囊、到期倒计时（30 天内变红）、CPU/RAM/硬盘细进度条，手机自动变卡片
+## 快速安装
 
-## 目录
-
-```
-server.py                面板：TCP 收上报 + HTTP 出数据 + 静态网页
-agent.py                 探针：采集本机状态并上报
-web/                     前端（index.html / style.css / app.js）
-deploy/*.service         systemd 单元
-install.sh               一键安装（server / agent 两种）
-server.json              面板配置（token、两个端口）
-agent.json               探针配置（面板地址、token、节点名）
-run/stats.json           面板自动写出的最新状态（原子替换）
-```
-
-## 装法
-
-面板那台：
+面板（选一台机器）：
 
 ```sh
-tar xf zstat.tar.gz && cd zstat
-sh install.sh server
-# 会打印 token 和网页地址；token 要抄给每台探针
+wget -O status.sh https://raw.githubusercontent.com/nluva/zstat-Status/main/install.sh
+bash status.sh s
 ```
 
-每台被控机：
+探针（每台被监控的机器）：
 
 ```sh
-tar xf zstat.tar.gz && cd zstat
-sh install.sh agent
-vi /opt/zstat/agent.json     # 填 server(面板IP) / token / name / location / expire
-systemctl restart zstat-agent
-journalctl -u zstat-agent -f # 看它有没有上报失败
+wget -O status.sh https://raw.githubusercontent.com/nluva/zstat-Status/main/install.sh
+bash status.sh c
 ```
+
+不带参数跑 `bash status.sh` 就是交互菜单，问你要装面板还是探针。
+
+## 面板装的时候会问什么
+
+1. 面板监听端口（默认 `8080`，**只绑 127.0.0.1**，由 nginx 反代）
+2. 探针上报端口（默认 `35601`）
+3. **域名**（不填就只在本机提供，自己反代）
+4. 域名用 **IPv4 还是 IPv6**（选 6 时 nginx 写 `listen [::]:80 ipv6only=on`）
+5. 证书邮箱（填了就自动装 nginx、写 vhost、跑 `certbot --nginx` 签证书，签完自动 `renew --dry-run` 验一遍续期）
+
+装完会打印下一步：给节点建账号。
+
+```sh
+sh /usr/local/ServerStatus/user.sh add hk1     # 生成随机密码并打印
+sh /usr/local/ServerStatus/user.sh list        # 看所有账号
+sh /usr/local/ServerStatus/user.sh del hk1     # 删
+```
+
+## 探针装的时候会问什么
+
+节点名称 → 面板地址 → 上报端口 → **账号** → **密码** → 机房位置 → 到期日。
+写进 `/usr/local/ServerStatus/agent.json`（600 权限），然后起 `zstat-agent`。
 
 ## 认证
 
-每台探针一个账号（`server.json` 里的 `users`），用 `user.sh add <名字>` 生成。
-没配 `users` 时才回退到旧的共享 token 方式（`token` 字段）。
+每台探针一个**用户名 + 密码**（`server.json` 的 `users` 数组），不是全局共享 token。
+没配 `users` 时才回退到 `token` 字段。
 
-## 离线判定
+## 网页长什么样
 
-`stale_seconds`（默认 30）秒内没收到某台的上报，服务端就把它的 `online4/online6` 置 false，
-前端显示「离线」——不会出现机器已经挂了、网页还显示运行中的情况。超时会附 `age`（秒）。
+- 一行一台机器，单行紧凑，1280 宽能看十几台
+- 状态只有两个：**运行中** / **失联中**（超过 `stale_seconds` 没上报就算失联）
+- 到期日期自动算天数，30 天内变红
+- CPU / RAM / 硬盘是细进度条，**鼠标放上去**看细节：
+  - CPU：核心数 + 型号（`4 核 · Intel Xeon E5-2678 v3`）
+  - RAM：已用/总量 + SWAP 已用/总量
+  - 硬盘：已用/总量
+- 页面 **5 秒**自动刷新；手机上是卡片布局；跟随系统深色模式
 
-## 对外暴露
+## 目录结构
 
-- 面板 HTTP 默认 `8080`，TCP 默认 `35601`
-- 只给网页看的话，用 nginx 反代 8080 就行，不用暴露 35601
-- 探针和面板之间的认证只有一个共享 token，够用但不适合公网裸奔；**建议 35601 只对探针的 IP 开放**（`iptables` 或云防火墙）
+```
+server.py                 面板：TCP 收上报 + HTTP 出 API + 静态网页
+agent.py                  探针：读 /proc 采集并上报
+web/                      前端（index.html / style.css / app.js）
+user.sh                   账号管理
+deploy/*.service          systemd 单元
+tools/demo_feed.py        灌假数据看效果的演示脚本（正式别跑）
+install.sh                安装脚本（就是 status.sh）
+```
 
-## 排错
+安装后统一在 `/usr/local/ServerStatus/`，systemd 单元是 `zstat-server` / `zstat-agent`。
 
-| 现象 | 检查 |
-|---|---|
-| 网页空白、表里没节点 | 面板 `journalctl -u zstat-server`；探针 `journalctl -u zstat-agent` |
-| 探针日志「上报失败」 | 面板 IP/端口对不对；防火墙有没有放 35601 |
-| 网页显示离线 | token 不对，或探针超过 30 秒没上报 |
-| 端口被占 | 改 `server.json` 的 `tcp_port`/`http_port`，`systemctl restart zstat-server` |
+## 常用命令
 
-## 和旧版的关系
+```sh
+systemctl status zstat-server
+systemctl restart zstat-agent
+journalctl -u zstat-server -n 50
+curl -s http://127.0.0.1:8080/api/servers | head -c 300
+```
 
-`ServerStatus-Hotaru` 的数据格式和服务端不兼容，是**另起一套**：
-老的 `status.sh` / `sergate` / vue 前端都不再需要。要迁移就一台一台把探针换过来，网页同时开着对比，稳了再停旧的。
+## 数据从哪来
 
-## 已知没做的
+探针每 5 秒发一行 JSON 到面板的 TCP 端口，面板按节点名存最新一份（内存里），
+顺便原子写到 `run/stats.json`；网页读 `/api/servers`。
 
-- 历史曲线（现在只有最新一帧）
-- 报警（超过阈值发消息）
-- 多用户/登录（面板目前是公开的）
-- IPv6-only 探测（只判断有没有 v6 出口，不测 v6 可达性）
+## 安全提醒
+
+- `35601` 只靠账号密码，**没有失败次数限制**：正式用请用安全组/防火墙只放探针 IP
+- 上报是明文 TCP：跨公网建议走内网或隧道
+- 面板本身**没有登录**：要么只在内网，要么放 nginx 的 `auth_basic` 后面
+
+## 已知没做
+
+- 历史曲线、阈值报警、多用户登录
+- 几百台规模（现在是全内存 + 一个 json，几十台没问题）
+- 探针侧的 HTTPS 上报
+
+## 和 ServerStatus-Hotaru 的关系
+
+另起一套，数据格式不兼容。老的可以同时开着，确认新链路稳了再停。
+
+## License
+
+MIT
