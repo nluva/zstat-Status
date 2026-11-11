@@ -1,11 +1,16 @@
-const ENDPOINT = '/api/servers';
+const ENDPOINT = 'api/servers';   // 相对路径：反代到子目录（如 /panel/）也能用
 
 function fmtBytes(n){
-  if (n === null || n === undefined) return '—';
+  if (n === null || n === undefined || n < 0) return '—';
   const u = ['B','K','M','G','T','P']; let i = 0, v = n;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return (v >= 100 ? v.toFixed(0) : v.toFixed(1)).replace(/\.0$/, '') + u[i];
 }
+function speed(n){
+  n = num(n);
+  return n < 0 ? '—' : fmtBytes(n) + '/s';
+}
+
 function pct(used, total){ return total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0; }
 
 function esc(s){
@@ -34,7 +39,11 @@ function bar(value, tip){
   return `<span class="bar ${cls}"${t}><span class="track"><i class="fill" style="width:${value}%"></i></span>` +
          `<span class="num">${value}%</span></span>`;
 }
+function looksLikeDate(s){
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(s || ''));
+}
 function daysLeft(dateStr){
+  if (!looksLikeDate(dateStr)) return null;
   const d = new Date(dateStr + 'T00:00:00');
   if (isNaN(d)) return null;
   return Math.ceil((d - new Date()) / 86400000);
@@ -65,10 +74,10 @@ function render(data){
     return `<tr>
       <td class="c-status" data-k="状态"><span class="state ${state}" title="最后上报 ${age} 秒前"><i class="dot"></i>${stateText}</span></td>
       <td class="c-name" data-k="节点"><div class="name">${esc(s.name)}</div><div class="loc">${esc(s.location||'')}</div></td>
-      <td class="c-date" data-k="到期"><span class="date ${dl !== null && dl <= warnAt ? 'warn':''}">${s.type||'—'}</span><span class="loc">${dl === null ? '' : dl < 0 ? '已过期' : '剩 ' + dl + ' 天 · ' + (yearly ? '年付' : '月付')}</span></td>
+      <td class="c-date" data-k="到期"><span class="date ${dl !== null && dl <= warnAt ? 'warn':''}">${looksLikeDate(s.type) ? s.type : '—'}</span><span class="loc">${dl === null ? '' : dl < 0 ? '已过期' : '剩 ' + dl + ' 天 · ' + (yearly ? '年付' : '月付')}</span></td>
       <td class="c-uptime" data-k="在线"><span class="mono">${s.uptime||'—'}</span></td>
-      <td class="c-load" data-k="负载"><span class="mono">${num(s.load).toFixed(2)}</span></td>
-      <td class="c-net" data-k="网络"><span class="mono">↓ ${fmtBytes(num(s.network_rx))}/s &nbsp; ↑ ${fmtBytes(num(s.network_tx))}/s</span></td>
+      <td class="c-load" data-k="负载"><span class="mono">${Math.max(0, num(s.load)).toFixed(2)}</span></td>
+      <td class="c-net" data-k="网络"><span class="mono">↓ ${speed(s.network_rx)} &nbsp; ↑ ${speed(s.network_tx)}</span></td>
       <td class="c-traffic" data-k="流量"><span class="mono">↓ ${fmtBytes(num(s.network_in))} &nbsp; ↑ ${fmtBytes(num(s.network_out))}</span></td>
       <td class="c-bar" data-k="CPU">${bar(s.cpu, num(s.cpu_cores) ? num(s.cpu_cores) + ' 核 · ' + (s.cpu_model || '未知型号') : (s.cpu_model || ''))}</td>
       <td class="c-bar" data-k="RAM">${bar(ram, `内存 已用 ${fmtBytes(num(s.memory_used))}，共 ${fmtBytes(num(s.memory_total))}　SWAP 已用 ${fmtBytes(num(s.swap_used))}/共 ${fmtBytes(num(s.swap_total))}`)}</td>

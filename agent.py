@@ -135,10 +135,13 @@ def has_ipv6():
 
 def main():
     cfg = load_conf()
-    interval = float(cfg.get("interval", 5))
+    interval = float(cfg.get("interval", 5) or 5)
+    if interval < 1:
+        interval = 1
     prev_total, prev_idle = read_cpu()
     prev_rx, prev_tx = read_net()
     prev_t = time.time()
+    model, cores = read_cpuinfo()      # 型号和核心数不会变，只读一次
 
     while True:
         time.sleep(interval)
@@ -172,7 +175,6 @@ def main():
             "net_interval": int(dt),
         }
         prev_rx, prev_tx = rx, tx
-        model, cores = read_cpuinfo()
         msg["cpu_model"] = model
         msg["cpu_cores"] = cores
         msg.update(read_mem())
@@ -181,8 +183,14 @@ def main():
             sock = socket.create_connection((cfg["server"], int(cfg.get("port", 35601))), timeout=5)
             sock.sendall((json.dumps(msg, ensure_ascii=False) + "\n").encode())
             sock.settimeout(3)
-            sock.recv(256)
+            reply = sock.recv(256)
             sock.close()
+            try:
+                if json.loads(reply.decode()).get("ok") is False:
+                    print("认证失败：账号或密码不对（面板那边加一次账号再填）", flush=True)
+                    time.sleep(min(60, interval * 6))
+            except Exception:
+                pass
         except OSError as e:
             print("上报失败：", e, flush=True)
             time.sleep(min(60, interval * 4))

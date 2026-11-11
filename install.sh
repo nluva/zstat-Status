@@ -11,10 +11,21 @@ set -e
 REPO="nluva/zstat-Status"
 BRANCH="main"
 TARBALL="https://github.com/$REPO/archive/refs/heads/$BRANCH.tar.gz"
-MIRROR="https://822229.xyz/dl/zstat-Status.tar.gz"
+MIRROR=""   # 不再用私人镜像；只从 GitHub 拉
 
 PREFIX="${ZSTAT_PREFIX:-/usr/local/ServerStatus}"
+# 安全阀：绝不往 / 或 /usr 这种地方动手
+case "$PREFIX" in
+  ""|"/"|"/usr"|"/etc"|"/var"|"/root"|"/home")
+    echo "拒绝执行：PREFIX 指向 $PREFIX，太危险了"; exit 1 ;;
+esac
+case "$PREFIX" in
+  /*) : ;;
+  *) echo "拒绝执行：PREFIX 必须是绝对路径（现在是 $PREFIX）"; exit 1 ;;
+esac
+if [ -n "$ZSTAT_PREFIX" ]; then NGX_CONF="$PREFIX/etc/nginx/conf.d/zstat.conf"; else NGX_CONF="/etc/nginx/conf.d/zstat.conf"; fi
 WEBROOT="$PREFIX/web"
+[ "$WEBROOT" != "$PREFIX" ] || { echo "拒绝执行：web 目录不能等于安装目录"; exit 1; }
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 ROLE="$1"
 ACTION=""
@@ -28,7 +39,27 @@ case "$ROLE" in
   *) echo "用法: bash status.sh [s|c|u|start|stop|restart|status|log]"; exit 1 ;;
 esac
 
-say() { printf '%s\n' "$*"; }
+C_G='\033[32m'; C_R='\033[31m'; C_Y='\033[33m'; C_0='\033[0m'
+say()  { printf '%s\n' "$*"; }
+info() { printf "${C_G}[信息]${C_0} %s\n" "$*"; }
+warn() { printf "${C_Y}[注意]${C_0} %s\n" "$*"; }
+err()  { printf "${C_R}[错误]${C_0} %s\n" "$*"; }
+
+check_sys() {
+  if [ -f /etc/redhat-release ]; then PM=yum
+  elif grep -qiE "debian|ubuntu" /etc/issue 2>/dev/null || grep -qiE "debian|ubuntu" /proc/version 2>/dev/null; then PM=apt
+  elif command -v pacman >/dev/null 2>&1; then PM=pacman
+  else PM=apt; fi
+}
+pkg_install() {   # pkg_install 包名...
+  for p in "$@"; do
+    case "$PM" in
+      yum) yum -y install "$p" >/dev/null 2>&1 || return 1 ;;
+      pacman) pacman -Sy --noconfirm "$p" >/dev/null 2>&1 || return 1 ;;
+      *) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$p" >/dev/null 2>&1 || return 1 ;;
+    esac
+  done
+}
 # 确认框（默认 y）：回车算 y，只有明确 n/no 才算否
 # 确认框（默认 N）：回车算 n，只有明确 y/yes 才算同意
 confirmn() {
@@ -43,9 +74,19 @@ confirm() {
   case "$_ans" in n|N|no|NO|No) return 1 ;; *) return 0 ;; esac
 }
 ask() { printf '%s' "$1"; read -r "$2" || true; }
+check_port() {  # check_port 值 说明
+  case "$1" in
+    *[!0-9]*|"") say "$2要是 1-65535 的数字"; exit 1 ;;
+  esac
+  [ "$1" -ge 1 ] && [ "$1" -le 65535 ] || { say "$2要在 1-65535 之间"; exit 1; }
+}
 askdefault() { printf '%s [%s]: ' "$1" "$2"; read -r "$3" || true; [ -n "$(eval echo \$$3)" ] || eval "$3='$2'"; }
 
 command -v python3 >/dev/null || { say "缺 python3，先装：apt-get install -y python3"; exit 1; }
+if [ -z "$ZSTAT_PREFIX" ] && [ "$(id -u)" != "0" ]; then
+  say "要用 root 跑（装服务、写 /etc 都得 root）：sudo bash $0 ${1:-}"
+  exit 1
+fi
 
 # ---------- 找到源码 ----------
 # 1) 脚本旁边就有源码（压缩包解开后运行）
@@ -57,6 +98,7 @@ find_src() {
   fi
   command -v tar >/dev/null || { say "缺 tar"; exit 1; }
   TMP=$(mktemp -d)
+  trap '[ -n "$TMP" ] && rm -rf "$TMP"' EXIT
   for URL in "$MIRROR" "$TARBALL"; do
     [ -n "$URL" ] || continue
     say "下载源码包：$URL"
@@ -79,13 +121,29 @@ find_src() {
   exit 1
 }
 if [ -z "$ROLE" ]; then
+  check_sys
+  st_server="未安装"; st_agent="未安装"
+  if [ -f /etc/systemd/system/zstat-server.service ]; then
+    st_server="已安装"
+    systemctl is-active --quiet zstat-server && st_server="${st_server}，运行中" || st_server="${st_server}，已停止"
+  fi
+  if [ -f /etc/systemd/system/zstat-agent.service ]; then
+    st_agent="已安装"
+    systemctl is-active --quiet zstat-agent && st_agent="${st_agent}，运行中" || st_agent="${st_agent}，已停止"
+  fi
+  say ""
+  say "zstat 探针面板　（系统：$PM）"
+  say "  面板：$st_server"
+  say "  探针：$st_agent"
+  say ""
   say "要做什么？"
   say "  1) 装面板 server（收所有探针的数据 + 网页）"
   say "  2) 装探针 client（把这台机器上报给面板）"
   say "  3) 卸载"
   say "  4) 启动   5) 停止   6) 重启   7) 看状态"
   say "  8) 节点账号（看列表 / 加 / 删）"
-  ask "选 1-7: " PICK
+  say "  9) 看面板日志   10) 看探针日志"
+  ask "选 1-10: " PICK
   case "$PICK" in
     1) ROLE=server ;;
     2) ROLE=client ;;
@@ -95,7 +153,9 @@ if [ -z "$ROLE" ]; then
     6) ROLE=manage; ACTION=restart ;;
     7) ROLE=manage; ACTION=status ;;
     8) ROLE=nodes ;;
-    *) say "只认 1-7"; exit 1 ;;
+    9) ROLE=logs ;;
+    10) ROLE=logs2 ;;
+    *) say "只认 1-10"; exit 1 ;;
   esac
 fi
 
@@ -169,7 +229,10 @@ svc() {   # svc 文件 名字
   sed "s#/opt/zstat#$PREFIX#g" "$SRC/$1" > "/etc/systemd/system/$2.service"
   [ -s "/etc/systemd/system/$2.service" ] || { say "写 systemd 单元失败：$SRC/$1 不存在？"; exit 1; }
   systemctl daemon-reload
-  systemctl enable --now "$2"
+  systemctl enable "$2" >/dev/null 2>&1 || true
+  # 重装时必须 restart：enable --now 对已经在跑的单元不会重启，
+  # 那样新写的配置/新代码都不会生效，看起来像"装了没用"。
+  systemctl restart "$2"
 }
 
 # ---------------- 面板 ----------------
@@ -189,14 +252,20 @@ if [ "$ROLE" = "server" ]; then
   case "$BINDMODE" in
     t|T|tcp|TCP)
       askdefault "面板监听端口（只给本机 nginx 用）" "8080" HTTP_PORT
-      case "$HTTP_PORT" in *[!0-9]*|"") say "端口要是数字"; exit 1;; esac
-      BIND_ADDR="127.0.0.1" ;;
+      check_port "$HTTP_PORT" "面板端口"
+      askdefault "监听地址（本机用 127.0.0.1 或 ::1）" "127.0.0.1" BIND_ADDR ;;
     *)
       HTTP_PORT=""
       BIND_ADDR="unix:$PREFIX/run/http.sock" ;;
   esac
   askdefault "探针上报端口" "35601" TCP_PORT
-  case "$TCP_PORT" in *[!0-9]*|"") say "端口要是数字"; exit 1;; esac
+  check_port "$TCP_PORT" "探针上报端口"
+
+  # 先把「要不要碰 nginx」问清楚，再动手装（跟上游一样问在前面）
+  NGX_YES=0
+  if confirmn "要我帮你装/配 nginx 吗？（本机已有就只加一个 conf.d/zstat.conf，不动你现有站点；选 N 只告诉你网站目录）"; then
+    NGX_YES=1
+  fi
 
   cat > "$PREFIX/server.json" <<JSON
 {
@@ -211,17 +280,24 @@ if [ "$ROLE" = "server" ]; then
 JSON
   chmod 600 "$PREFIX/server.json"
   svc deploy/zstat-server.service zstat-server
+  if [ -z "$ZSTAT_PREFIX" ]; then
+    sleep 2
+    if ! systemctl is-active --quiet zstat-server; then
+      say "面板没起来。看错误：journalctl -u zstat-server -n 30"
+      exit 1
+    fi
+  fi
   if [ -n "$HTTP_PORT" ]; then
-    say "面板已启动（127.0.0.1:$HTTP_PORT，探针端口 $TCP_PORT）"
+    say "面板已启动（$BIND_ADDR:$HTTP_PORT，探针端口 $TCP_PORT）"
   else
     say "面板已启动（socket：$PREFIX/run/http.sock，探针端口 $TCP_PORT）"
   fi
   say ""
-  if confirmn "要我帮你装/配 nginx 吗？（本机已有就只加一个 conf.d/zstat.conf，不动你现有站点）"; then
+  if [ "$NGX_YES" = "1" ]; then
     if ! command -v nginx >/dev/null; then
-      if confirm "本机没有 nginx，现在装一个？"; then
-        DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx && mark_installed nginx || say "nginx 装失败"
-      fi
+      info "本机没有 nginx，装一个"
+      case "$PM" in apt) DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 ;; esac
+      pkg_install nginx && mark_installed nginx || warn "nginx 装失败"
     fi
     if command -v nginx >/dev/null; then
       ask "域名（可空，空就按端口/IP 访问）: " NDOMAIN
@@ -245,7 +321,31 @@ JSON
       if nginx -t >/dev/null 2>&1; then
         systemctl reload nginx
         say "nginx 已配好：/etc/nginx/conf.d/zstat.conf${NDOMAIN:+　http://$NDOMAIN}"
-        say "要 HTTPS：certbot --nginx -d $NDOMAIN"
+        if [ -n "$NDOMAIN" ]; then
+          if ! command -v certbot >/dev/null; then
+            pkg_install certbot || true
+          fi
+          # nginx 插件缺了 certbot --nginx 会直接报错，补一下（各发行版包名不同，失败就算了）
+          pkg_install python3-certbot-nginx || pkg_install certbot-nginx || true
+          if command -v certbot >/dev/null; then
+            ask "证书邮箱（可空，空就不填）: " CMAIL
+            CEMAIL_ARGS="--register-unsafely-without-email"
+            [ -n "$CMAIL" ] && CEMAIL_ARGS="-m $CMAIL"
+            info "开始申请证书：$NDOMAIN"
+            if certbot --nginx -d "$NDOMAIN" --agree-tos $CEMAIL_ARGS --redirect -n >/tmp/zstat-cert.log 2>&1; then
+              mark_installed certbot
+              mark_installed "domain=$NDOMAIN"
+              say "HTTPS 好了：https://$NDOMAIN（会自动续期，certbot.timer 负责）"
+              systemctl list-timers certbot.timer --no-pager >/dev/null 2>&1 || say "提示：没找到 certbot.timer，续期可能要手动加"
+            else
+              say "证书没签下来，原因（最后几行）："
+              tail -5 /tmp/zstat-cert.log
+              say "常见原因：域名没解析到这台机器 / 80 端口没放开"
+            fi
+          else
+            say "没装上 certbot，HTTPS 先跳过；手动：certbot --nginx -d $NDOMAIN"
+          fi
+        fi
       else
         rm -f /etc/nginx/conf.d/zstat.conf
         say "nginx -t 没过，我把 zstat.conf 删了，你的 nginx 没动："
@@ -255,39 +355,12 @@ JSON
       say "没有 nginx，跳过。下面这段自己反代。"
     fi
   else
-    say "好，不碰 nginx。下面这些你自己反代。"
+    say "好，不碰 nginx。"
   fi
 
   say ""
-  say "静态目录：$WEBROOT"
-  say ""
-  say "  静态目录：$WEBROOT"
-  if [ -n "$HTTP_PORT" ]; then say "  API 地址：127.0.0.1:$HTTP_PORT"; else say "  API 地址：unix:$PREFIX/run/http.sock"; fi
-  say ""
-  say "  （只反代静态目录也行：$WEBROOT 里会自动写 stats.json，前端读不到 /api 就改读它）"
-  say ""
-  say "  nginx 大概这么写："
-  if [ -n "$HTTP_PORT" ]; then
-    say "  # 静态文件 + API（TCP 端口）"
-    say "  root $WEBROOT;"
-    say "  location /api/ {"
-    say "      proxy_pass http://127.0.0.1:$HTTP_PORT;"
-    say "      proxy_set_header Host \$host;"
-    say "  }"
-    say "  location / { try_files \$uri \$uri/ /index.html; }"
-  else
-    say "  # 静态文件 + API（unix socket，不占端口）"
-    say "  root $WEBROOT;"
-    say "  location /api/ {"
-    say "      proxy_pass http://unix:$PREFIX/run/http.sock:;"
-    say "      proxy_set_header Host \$host;"
-    say "  }"
-    say "  location / { try_files \$uri \$uri/ /index.html; }"
-    say ""
-    say "  socket 文件权限是 666，nginx 能直接写；nginx 要是有 user 限制，确认 /run 目录可读。"
-  fi
-  say ""
-  say "要 HTTPS 就自己跑：certbot --nginx -d 你的域名"
+  say "网站目录：$WEBROOT"
+  say "探针端口：$TCP_PORT"
   say ""
   say "下一步：给每台机器建账号"
   say "  sh $PREFIX/user.sh add hk1"
@@ -317,30 +390,31 @@ PY2
   ask "节点名称（面板上显示的名字，如 HK-1）: " CNAME
   ask "面板地址（域名或 IP）: " CSERVER
   askdefault "上报端口" "35601" TCP_PORT
-  case "$TCP_PORT" in *[!0-9]*|"") say "端口要是数字，用 35601"; exit 1;; esac
+  check_port "$TCP_PORT" "上报端口"
   ask "账号: " CUSER
   ask "密码: " CPASS
   ask "机房/位置（如 Hong Kong，可空）: " CLOC
-  ask "到期日 YYYY-MM-DD（可空）: " CEXP
-  CCYCLE=""
-  if [ -n "$CEXP" ]; then
-    ask "月付还是年付？(m/y) [m]: " CCYCLE
-    case "$CCYCLE" in y|Y|year|年|年付) CCYCLE=year ;; *) CCYCLE=month ;; esac
-  fi
-
-  cat > "$PREFIX/agent.json" <<JSON
-{
-  "server": "$CSERVER",
-  "port": $TCP_PORT,
-  "user": "$CUSER",
-  "password": "$CPASS",
-  "name": "$CNAME",
-  "location": "$CLOC",
-  "expire": "$CEXP",
-  "cycle": "$CCYCLE",
-  "interval": 5
+  CCYCLE=""; CEXP=""   # 到期日/周期在面板的「节点账号」里管，这里不重复问
+  A_SERVER="$CSERVER" A_PORT="$TCP_PORT" A_USER="$CUSER" A_PASS="$CPASS" \
+  A_NAME="$CNAME" A_LOC="$CLOC" A_EXP="$CEXP" A_CYC="$CCYCLE" \
+  python3 - "$PREFIX/agent.json" <<'PYJ'
+import json, os, sys
+cfg = {
+    "server": os.environ["A_SERVER"],
+    "port": int(os.environ["A_PORT"]),
+    "user": os.environ["A_USER"],
+    "password": os.environ["A_PASS"],
+    "name": os.environ["A_NAME"],
+    "location": os.environ["A_LOC"],
+    "expire": os.environ["A_EXP"],
+    "cycle": os.environ["A_CYC"],
+    "interval": 5,
 }
-JSON
+tmp = sys.argv[1] + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(cfg, f, ensure_ascii=False, indent=1)
+os.replace(tmp, sys.argv[1])
+PYJ
   chmod 600 "$PREFIX/agent.json"
 
   svc deploy/zstat-agent.service zstat-agent
@@ -371,10 +445,17 @@ PY
 node_add() {
   ask "新节点账号（英文，如 hk2）: " NNAME
   [ -n "$NNAME" ] || { say "没填，算了"; return; }
-  ask "到期日 YYYY-MM-DD（可空）: " NEXP
+  ask "到期日 YYYY-MM-DD（可空，空着就不写到到期时间）: " NEXP
   NCP=""
   if [ -n "$NEXP" ]; then
+    case "$NEXP" in
+      [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
+      *) say "日期格式不对（要 2026-12-01 这种），这次先不写到期日"; NEXP="" ;;
+    esac
+  fi
+  if [ -n "$NEXP" ]; then
     ask "月付还是年付？(m/y) [m]: " NCP
+    case "$NCP" in y|Y|year|年|年付) NCP=year ;; *) NCP=month ;; esac
   fi
   sh "$PREFIX/user.sh" add "$NNAME" "" "$NCP" "$NEXP" | sed -n '1,4p'
 }
@@ -445,11 +526,18 @@ if [ "$ROLE" = "nodes" ]; then
   nodes
 fi
 
+if [ "$ROLE" = "logs" ] || [ "$ROLE" = "logs2" ]; then
+  unit=zstat-server; [ "$ROLE" = "logs2" ] && unit=zstat-agent
+  say "---- $unit 最近 50 行（Ctrl-C 退出跟踪）----"
+  journalctl -u "$unit" -n 50 --no-pager 2>/dev/null || tail -n 50 /var/log/syslog 2>/dev/null || say "没有日志可看"
+fi
+
 # ---------------- uninstall ----------------
 if [ "$ROLE" = "uninstall" ]; then
   HAVE_SERVER=0; HAVE_AGENT=0
-  [ -f /etc/systemd/system/zstat-server.service ] && HAVE_SERVER=1 || true
-  [ -f /etc/systemd/system/zstat-agent.service ] && HAVE_AGENT=1 || true
+  # 有单元文件、或者有对应配置文件，都算装过（防止有人手动删了 unit 就卸不掉）
+  { [ -f /etc/systemd/system/zstat-server.service ] || [ -f "$PREFIX/server.json" ]; } && HAVE_SERVER=1 || true
+  { [ -f /etc/systemd/system/zstat-agent.service ] || [ -f "$PREFIX/agent.json" ]; } && HAVE_AGENT=1 || true
   if [ "$HAVE_SERVER" = 0 ] && [ "$HAVE_AGENT" = 0 ] && [ ! -d "$PREFIX" ]; then
     say "这台机器上没找到 zstat，应该没装过。"
     exit 0
@@ -458,29 +546,43 @@ if [ "$ROLE" = "uninstall" ]; then
   ask "卸哪个？面板填 1，探针填 2，两个都卸填 3: " WHICH
   case "$WHICH" in 1|2|3) ;; *) say "只认 1、2、3"; exit 1 ;; esac
 
+  # 只装了其中一个却选了另一个：别让它顺手把目录删了
+  if [ "$WHICH" = "1" ] && [ "$HAVE_SERVER" = 0 ]; then
+    say "这台机器上没装面板。"
+    [ "$HAVE_AGENT" = 1 ] && say "（只装了探针，要卸载探针请选 2）"
+    exit 0
+  fi
+  if [ "$WHICH" = "2" ] && [ "$HAVE_AGENT" = 0 ]; then
+    say "这台机器上没装探针。"
+    [ "$HAVE_SERVER" = 1 ] && say "（只装了面板，要卸载面板请选 1）"
+    exit 0
+  fi
+
   # 1) 停服务、删单元
   if [ "$WHICH" = "1" ] || [ "$WHICH" = "3" ]; then
     if [ "$HAVE_SERVER" = 1 ]; then
       systemctl disable --now zstat-server >/dev/null 2>&1 || true
       rm -f /etc/systemd/system/zstat-server.service
+      say "面板服务已停"
     fi
-    say "面板服务已停"
   fi
   if [ "$WHICH" = "2" ] || [ "$WHICH" = "3" ]; then
     if [ "$HAVE_AGENT" = 1 ]; then
       systemctl disable --now zstat-agent >/dev/null 2>&1 || true
       rm -f /etc/systemd/system/zstat-agent.service
+      say "探针服务已停"
     fi
-    say "探针服务已停"
   fi
   systemctl daemon-reload >/dev/null 2>&1 || true
 
   # 2) nginx 站点 / 证书 / 目录：卸面板就一起清，不再多问
   if [ "$WHICH" = "1" ] || [ "$WHICH" = "3" ]; then
-    if [ -f /etc/nginx/sites-available/zstat ]; then
-      rm -f /etc/nginx/sites-enabled/zstat /etc/nginx/sites-available/zstat
-      command -v nginx >/dev/null && { nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true; }
-      say "nginx 里的 zstat 站点已删"
+    if [ -f "$NGX_CONF" ] || [ -f /etc/nginx/sites-available/zstat ]; then
+      rm -f "$NGX_CONF" /etc/nginx/sites-enabled/zstat /etc/nginx/sites-available/zstat
+      if command -v nginx >/dev/null; then
+        nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
+      fi
+      say "nginx 里 zstat 的站点配置已删"
     fi
     for d in $(grep '^domain=' "$PREFIX/.zstat-installed" 2>/dev/null | sed 's/^domain=//'); do
       if command -v certbot >/dev/null; then
@@ -489,7 +591,11 @@ if [ "$ROLE" = "uninstall" ]; then
     done
   fi
 
-  # 3) 软件：只问这一句
+  # 3) 软件：只问这一句。卸探针时不碰这些——探针跟 nginx/certbot 没关系
+  # 只有「这次真的卸了面板」才问软件；只卸探针（或选3但本来就只有探针）都不问
+  if [ "$WHICH" = "2" ] || { [ "$WHICH" = "3" ] && [ "$HAVE_SERVER" = 0 ]; }; then
+    PKGS=""
+  else
   PKGS=""
   if [ -f "$PREFIX/.zstat-installed" ]; then
     PKGS=$(grep -v '^domain=' "$PREFIX/.zstat-installed" | sort -u | tr '\n' ' ')
@@ -502,7 +608,11 @@ if [ "$ROLE" = "uninstall" ]; then
         if [ -n "$ZSTAT_PREFIX" ]; then
           say "（测试模式：不真的卸载 $p）"
         else
-          DEBIAN_FRONTEND=noninteractive apt-get purge -y "$p" >/dev/null 2>&1 || say "$p 卸载失败"
+          case "$PM" in
+            yum) yum -y remove "$p" >/dev/null 2>&1 || say "$p 卸载失败" ;;
+            pacman) pacman -R --noconfirm "$p" >/dev/null 2>&1 || say "$p 卸载失败" ;;
+            *) DEBIAN_FRONTEND=noninteractive apt-get purge -y "$p" >/dev/null 2>&1 || say "$p 卸载失败" ;;
+          esac
         fi
       done
       [ -z "$ZSTAT_PREFIX" ] && { apt-get autoremove -y >/dev/null 2>&1 || true; }
@@ -510,6 +620,7 @@ if [ "$ROLE" = "uninstall" ]; then
     else
       say "软件保留（nginx / certbot 没动）"
     fi
+  fi
   fi
 
   # 4) 程序目录：只卸面板时删；机器上还有别的角色就留着

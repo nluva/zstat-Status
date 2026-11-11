@@ -48,11 +48,12 @@ def refresh_conf():
         return
     if m == CONF_MTIME[0]:
         return
-    CONF_MTIME[0] = m
     try:
-        CONF_DATA.update(load_conf())
+        fresh = load_conf()
     except Exception:
-        pass
+        return          # 文件正在被写（半截 JSON），下次再试
+    CONF_DATA.update(fresh)
+    CONF_MTIME[0] = m
 SERVERS = {}            # name -> 最新一条上报（dict）
 LOCK = threading.Lock()
 LAST_WRITE = [0.0]
@@ -86,7 +87,7 @@ def save_stats():
     data = {"servers": snapshot(), "updated": int(time.time())}
     for path in (STATS, WEBSTATS):
         try:
-            tmp = path + ".tmp"
+            tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
             os.replace(tmp, path)
@@ -151,9 +152,14 @@ async def handle(reader, writer):
             name = str(msg.get("name") or "").strip()
             if not name:
                 continue
+            # 用账号当 key：两台机器万一起了同名，也不会互相覆盖
+            key = str(msg.get("user") or "").strip().lower() or name
             payload = {k: v for k, v in msg.items() if k not in ("token", "user", "password")}
             with LOCK:
-                SERVERS[name] = merge(SERVERS.get(name), payload)
+                SERVERS[key] = merge(SERVERS.get(key), payload)
+                cutoff = time.time() - 7 * 86400
+                for k in [k for k, v in SERVERS.items() if v.get("_ts", 0) < cutoff]:
+                    SERVERS.pop(k, None)
             now = time.time()
             if now - LAST_WRITE[0] >= 2.0:
                 LAST_WRITE[0] = now
@@ -165,6 +171,17 @@ async def handle(reader, writer):
     finally:
         try:
             writer.close()
+        except Exception:
+            pass
+
+
+def stats_writer():
+    """每 5 秒写一次 stats.json：没有新上报时 age 也要继续涨，不然静态页面永远显示在线。"""
+    while True:
+        time.sleep(5)
+        try:
+            if SERVERS:
+                save_stats()
         except Exception:
             pass
 
@@ -204,6 +221,11 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 
+class ThreadingHTTPServer6(ThreadingHTTPServer):
+    """IPv6 版：bind 里带冒号（如 ::1 或 ::）时用这个。"""
+    address_family = socket.AF_INET6
+
+
 class UnixHTTPServer(ThreadingHTTPServer):
     """监听 unix socket：不用占端口，nginx 直接 proxy_pass 到 socket 文件。"""
     address_family = socket.AF_UNIX
@@ -218,20 +240,23 @@ class UnixHTTPServer(ThreadingHTTPServer):
             os.chmod(self.server_address, 0o666)
         except OSError:
             pass
-
-    def server_name(self):
-        return "unix"
+        self.server_name = str(self.server_address)
+        self.server_port = 0
 
 
 def start_http():
+  try:
     bind = str(CONF_DATA.get("bind", "0.0.0.0"))
     if bind.startswith("unix:"):
         path = bind[5:]
         os.makedirs(os.path.dirname(path), exist_ok=True)
         srv = UnixHTTPServer(path, Handler)
     else:
-        srv = ThreadingHTTPServer((bind, CONF_DATA["http_port"]), Handler)
+        cls = ThreadingHTTPServer6 if ":" in bind else ThreadingHTTPServer
+        srv = cls((bind, CONF_DATA["http_port"]), Handler)
     srv.serve_forever()
+  except Exception as e:
+    print(f"HTTP 起不来（{CONF_DATA.get('bind')}）：{e}", flush=True)
 
 
 async def main():
@@ -239,10 +264,32 @@ async def main():
     if wr and not os.path.isdir(wr):
         print(f"警告：web 目录不存在：{wr}（网页会 404）")
     threading.Thread(target=start_http, daemon=True).start()
-    srv = await asyncio.start_server(handle, "0.0.0.0", CONF_DATA["tcp_port"])
-    print(f"zstat server: tcp {CONF_DATA['tcp_port']} / http {CONF_DATA['http_port']}")
-    async with srv:
-        await srv.serve_forever()
+    threading.Thread(target=stats_writer, daemon=True).start()
+    port = CONF_DATA["tcp_port"]
+    servers = []
+    v4_ok = v6_ok = False
+    # v4
+    try:
+        servers.append(await asyncio.start_server(handle, "0.0.0.0", port))
+        v4_ok = True
+    except OSError as e:
+        print(f"v4 监听失败：{e}")
+    # v6（单独一个 socket，V6ONLY=1，避免和 v4 抢同一个端口）
+    try:
+        s6 = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s6.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s6.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        s6.bind(("::", port))
+        s6.listen(128)
+        servers.append(await asyncio.start_server(handle, sock=s6))
+        v6_ok = True
+    except OSError as e:
+        print(f"v6 监听跳过：{e}")
+    if not servers:
+        print("端口一个都没监听上，退出")
+        return
+    print(f"zstat server: tcp {port}（v4 {'✓' if v4_ok else '✗'} / v6 {'✓' if v6_ok else '✗'}）http {CONF_DATA['http_port'] or 'unix'}")
+    await asyncio.gather(*(s.serve_forever() for s in servers))
 
 
 if __name__ == "__main__":

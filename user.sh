@@ -20,7 +20,7 @@ case "$CMD" in
     [ -n "$NAME" ] || { echo "用法: sh user.sh add <用户名> [密码]"; exit 1; }
     [ -n "$PASS" ] || PASS=$(head -c 9 /dev/urandom | base64 | tr -d '/+=' | head -c 12)
     python3 - "$CONF" "$NAME" "$PASS" "$CYCLE" "$EXPIRE" <<'PY'
-import json, sys
+import json, os, sys
 path, name, pw = sys.argv[1:4]
 cycle = (sys.argv[4] if len(sys.argv) > 4 else "") or ""
 expire = (sys.argv[5] if len(sys.argv) > 5 else "") or ""
@@ -38,7 +38,10 @@ if cycle.strip():
     e["cycle"] = "year" if cycle.strip().lower().startswith("y") else "month"
 users.append(e)
 d["users"] = users
-json.dump(d, open(path, "w"), ensure_ascii=False, indent=1)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(d, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
 print("已添加账号：", name)
 print("密码：", pw)
 print("探针那边填：账号 %s / 密码 %s" % (name, pw))
@@ -61,7 +64,7 @@ PY
   renew)
     [ -n "$NAME" ] || { echo "用法: sh user.sh renew <用户名> [m|y]"; exit 1; }
     python3 - "$CONF" "$NAME" "$PASS" <<'PY'
-import json, sys, calendar, datetime
+import json, os, sys, calendar, datetime
 path, name, cycle = sys.argv[1], sys.argv[2], (sys.argv[3] if len(sys.argv) > 3 else "")
 d = json.load(open(path))
 users = d.get("users") or []
@@ -75,6 +78,7 @@ base = u.get("expire") or ""
 try:
     st = datetime.date.fromisoformat(base)
 except Exception:
+    print("注意：这个账号没有可用的到期日（%r），按今天算" % base)
     st = datetime.date.today()
 
 # 规则：同一天的下一个月/下一年，再退一天
@@ -92,7 +96,10 @@ else:
 
 u["expire"] = nxt.isoformat()
 u["cycle"] = cyc
-json.dump(d, open(path, "w"), ensure_ascii=False, indent=1)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(d, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
 print("已续期 %s：%s → %s（%s）" % (name, base or "今天起", u["expire"], "年付" if cyc == "year" else "月付"))
 PY
     systemctl restart zstat-server 2>/dev/null || true
@@ -100,13 +107,18 @@ PY
   del)
     [ -n "$NAME" ] || { echo "用法: sh user.sh del <用户名>"; exit 1; }
     python3 - "$CONF" "$NAME" <<'PY'
-import json, sys
+import json, os, sys
 path, name = sys.argv[1:3]
 d = json.load(open(path))
 before = len(d.get("users") or [])
 d["users"] = [u for u in d.get("users", []) if u.get("user") != name]
-json.dump(d, open(path, "w"), ensure_ascii=False, indent=1)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(d, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
 print("删了 %d 个" % (before - len(d["users"])))
+if not d.get("users"):
+    print("注意：一个账号都不剩了，所有探针都会连不上（面板会拒绝上报）。")
 PY
     systemctl restart zstat-server 2>/dev/null || true
     ;;
