@@ -67,6 +67,7 @@ def snapshot():
     with LOCK:
         for s in SERVERS.values():
             item = {k: v for k, v in s.items() if not k.startswith("_")}
+            item["user"] = s.get("_user", item.get("user", ""))
             if "online4" in s:
                 item["online4"] = bool(s["online4"])
             if "online6" in s:
@@ -79,6 +80,12 @@ def snapshot():
             else:
                 item["stale"] = False
             out.append(item)
+
+    order = [str(x) for x in (CONF_DATA.get("order") or [])]
+    if order:
+        rank = {k: i for i, k in enumerate(order)}
+        out.sort(key=lambda it: (rank.get(str(it.get("user") or ""), len(rank)),
+                                 str(it.get("name") or "")))
     return out
 
 
@@ -157,6 +164,7 @@ async def handle(reader, writer):
             payload = {k: v for k, v in msg.items() if k not in ("token", "user", "password")}
             with LOCK:
                 SERVERS[key] = merge(SERVERS.get(key), payload)
+                SERVERS[key]["_user"] = key    # 排序用，key 就是账号
                 cutoff = time.time() - 7 * 86400
                 for k in [k for k, v in SERVERS.items() if v.get("_ts", 0) < cutoff]:
                     SERVERS.pop(k, None)

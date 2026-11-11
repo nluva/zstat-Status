@@ -141,7 +141,7 @@ if [ -z "$ROLE" ]; then
   say "  2) 装探针 client（把这台机器上报给面板）"
   say "  3) 卸载"
   say "  4) 启动   5) 停止   6) 重启   7) 看状态"
-  say "  8) 节点账号（看列表 / 加 / 删）"
+  say "  8) 节点账号（看列表 / 加 / 删 / 续期 / 调顺序）"
   say "  9) 看面板日志   10) 看探针日志"
   ask "选 1-10: " PICK
   case "$PICK" in
@@ -460,6 +460,63 @@ node_add() {
   sh "$PREFIX/user.sh" add "$NNAME" "" "$NCP" "$NEXP" | sed -n '1,4p'
 }
 
+node_order() {
+  NAMES=$(python3 - "$PREFIX/server.json" <<'PYO'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    print(""); raise SystemExit
+order = [str(x) for x in (d.get("order") or [])]
+users = [str(u.get("user")) for u in (d.get("users") or []) if u.get("user")]
+rank = {k: i for i, k in enumerate(order)}
+users.sort(key=lambda u: (rank.get(u, len(rank)), u))
+print(" ".join(users))
+PYO
+)
+  [ -n "$NAMES" ] || { say "还没有节点账号"; return; }
+  say ""
+  say "当前顺序："
+  i=0
+  for n in $NAMES; do
+    i=$((i+1))
+    NINFO=$(python3 - "$PREFIX/server.json" "$n" <<'PYN'
+import json, sys
+d = json.load(open(sys.argv[1]))
+for u in d.get("users") or []:
+    if str(u.get("user")) == sys.argv[2]:
+        print("%s  %s" % (u.get("name") or "", u.get("expire") or "-"))
+        break
+PYN
+)
+    say "  $i) $n    $NINFO"
+  done
+  ask "新的顺序（填序号，空格分隔，如 3 1 2；回车不改）: " NEWORD
+  [ -n "$NEWORD" ] || { say "没改"; return; }
+  python3 - "$PREFIX/server.json" "$NEWORD" "$NAMES" <<'PYS'
+import json, os, sys
+path, spec, names = sys.argv[1], sys.argv[2], sys.argv[3].split()
+try:
+    idx = [int(x) - 1 for x in spec.split()]
+except ValueError:
+    print("序号要填数字"); raise SystemExit(1)
+order = []
+for i in idx:
+    if 0 <= i < len(names) and names[i] not in order:
+        order.append(names[i])
+for n in names:            # 没提到的保持在后
+    if n not in order:
+        order.append(n)
+d = json.load(open(path))
+d["order"] = order
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(d, f, ensure_ascii=False, indent=1)
+os.replace(tmp, path)
+print("新顺序：" + " → ".join(order))
+PYS
+}
+
 node_del() {
   ask "要删哪个序号: " NIDX
   NAME=$(python3 - "$PREFIX/server.json" "$NIDX" <<'PY2'
@@ -507,11 +564,12 @@ nodes() {
     say "---- 节点账号 ----"
     node_list
     say ""
-    ask "a 添加 / d 删除 / r 续期 / 回车返回: " NACT
+    ask "a 添加 / d 删除 / r 续期 / o 调整顺序 / 回车返回: " NACT
     case "$NACT" in
       a|A) node_add ;;
       d|D) node_del ;;
       r|R) node_renew ;;
+      o|O|order|顺序|排序) node_order ;;
       *) return ;;
     esac
   done
