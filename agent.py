@@ -218,6 +218,10 @@ def main():
         msg.update(read_mem())
         msg.update(read_disk())
         try:
+            msg["disks"] = read_disks()     # 每块真实磁盘（数据盘也算）
+        except Exception:
+            msg["disks"] = []
+        try:
             sock = socket.create_connection((cfg["server"], int(cfg.get("port", 35601))), timeout=5)
             sock.sendall((json.dumps(msg, ensure_ascii=False) + "\n").encode())
             sock.settimeout(3)
