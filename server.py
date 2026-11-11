@@ -59,6 +59,18 @@ LOCK = threading.Lock()
 LAST_WRITE = [0.0]
 
 
+def prune():
+    """清掉太久没上报的节点（默认 7 天，可在 server.json 里配 retain_days）。"""
+    try:
+        days = float(CONF_DATA.get("retain_days", 7) or 7)
+    except (TypeError, ValueError):
+        days = 7
+    cutoff = time.time() - days * 86400
+    with LOCK:
+        for k in [k for k, v in SERVERS.items() if v.get("_ts", 0) < cutoff]:
+            SERVERS.pop(k, None)
+
+
 def snapshot():
     """给前端用的快照：算好 age / stale，别让静态文件版本显示成永远在线。"""
     now = time.time()
@@ -167,9 +179,6 @@ async def handle(reader, writer):
             with LOCK:
                 SERVERS[key] = merge(SERVERS.get(key), payload)
                 SERVERS[key]["_user"] = key    # 排序用，key 就是账号
-                cutoff = time.time() - 7 * 86400
-                for k in [k for k, v in SERVERS.items() if v.get("_ts", 0) < cutoff]:
-                    SERVERS.pop(k, None)
             now = time.time()
             if now - LAST_WRITE[0] >= 2.0:
                 LAST_WRITE[0] = now
@@ -186,10 +195,11 @@ async def handle(reader, writer):
 
 
 def stats_writer():
-    """每 5 秒写一次 stats.json：没有新上报时 age 也要继续涨，不然静态页面永远显示在线。"""
+    """每 5 秒写一次 stats.json（没有新上报时 age 也要继续涨），并顺带清理过期节点。"""
     while True:
         time.sleep(5)
         try:
+            prune()
             if SERVERS:
                 save_stats()
         except Exception:

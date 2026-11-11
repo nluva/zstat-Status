@@ -248,12 +248,22 @@ if [ "$ROLE" = "server" ]; then
   find_src
   install_files
 
+  # 这台机器对外是 v4 还是 v6？后面的监听、nginx、证书都跟着它走
+  ask "这台机器对外用 IPv4 还是 IPv6？(4/6) [4]: " FAM_ANS
+  case "$FAM_ANS" in 6|v6|ipv6|V6) NGFAM=6 ;; *) NGFAM=4 ;; esac
+  if [ "$NGFAM" = "6" ]; then DEF_BIND="::1"; else DEF_BIND="127.0.0.1"; fi
+  # 选了 v6 但这台机器其实没有 v6 → 立刻退回 v4，别等 nginx 起不来
+  if [ "$NGFAM" = "6" ] && ! python3 -c 'import socket; s=socket.socket(socket.AF_INET6, socket.SOCK_STREAM); s.bind(("::1", 0)); s.close()' >/dev/null 2>&1; then
+    warn "这台机器没有可用的 IPv6 回环地址，改用 IPv4"
+    NGFAM=4; DEF_BIND="127.0.0.1"
+  fi
+
   ask "监听方式：unix socket（推荐，不占端口，nginx 直接 proxy_pass 到文件）还是 TCP 端口？(u/t) [u]: " BINDMODE
   case "$BINDMODE" in
     t|T|tcp|TCP)
       askdefault "面板监听端口（只给本机 nginx 用）" "8080" HTTP_PORT
       check_port "$HTTP_PORT" "面板端口"
-      askdefault "监听地址（本机用 127.0.0.1 或 ::1）" "127.0.0.1" BIND_ADDR ;;
+      askdefault "监听地址（本机用 $DEF_BIND）" "$DEF_BIND" BIND_ADDR ;;
     *)
       HTTP_PORT=""
       BIND_ADDR="unix:$PREFIX/run/http.sock" ;;
@@ -305,7 +315,12 @@ JSON
       mkdir -p /etc/nginx/conf.d
       {
         echo "server {"
-        echo "    listen 80;"
+        if [ "$NGFAM" = "6" ]; then
+          echo "    listen 80;"
+          echo "    listen [::]:80;"
+        else
+          echo "    listen 80;"
+        fi
         [ -n "$NDOMAIN" ] && echo "    server_name $NDOMAIN;"
         echo "    root $WEBROOT;"
         echo "    index index.html;"
@@ -319,8 +334,16 @@ JSON
         echo "}"
       } > /etc/nginx/conf.d/zstat.conf
       if nginx -t >/dev/null 2>&1; then
-        systemctl reload nginx
-        say "nginx 已配好：/etc/nginx/conf.d/zstat.conf${NDOMAIN:+　http://$NDOMAIN}"
+        # 重载要真的成功才算配好（nginx 没跑、端口被占都会失败）
+        if ! systemctl is-active --quiet nginx; then systemctl start nginx >/dev/null 2>&1 || true; fi
+        if systemctl reload nginx >/dev/null 2>&1 && systemctl is-active --quiet nginx; then
+          say "nginx 已配好：/etc/nginx/conf.d/zstat.conf${NDOMAIN:+　http://$NDOMAIN（IPv$NGFAM）}"
+        else
+          warn "nginx 配置写好了，但重载/启动失败（端口被占？）"
+          say "看错误：nginx -t；journalctl -u nginx -n 20"
+          rm -f /etc/nginx/conf.d/zstat.conf
+          say "已把我加的那个 conf 删掉，你原来的 nginx 没动"
+        fi
         if [ -n "$NDOMAIN" ]; then
           if ! command -v certbot >/dev/null; then
             pkg_install certbot || true
