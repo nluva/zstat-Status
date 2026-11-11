@@ -69,6 +69,44 @@ def read_net():
     return rx, tx
 
 
+DISK_FS = {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "vfat", "ntfs", "fuseblk"}
+
+
+def read_disks():
+    """所有真实块设备的挂载点（数据盘也要算进来），按容量从大到小。"""
+    out, seen = [], set()
+    try:
+        with open("/proc/mounts") as f:
+            lines = f.readlines()
+    except OSError:
+        lines = []
+    for ln in lines:
+        parts = ln.split()
+        if len(parts) < 3:
+            continue
+        dev, mnt, fs = parts[0], parts[1], parts[2]
+        if fs not in DISK_FS or not dev.startswith("/dev/"):
+            continue
+        if dev in seen:
+            continue
+        try:
+            st = os.statvfs(mnt)
+        except OSError:
+            continue
+        total = st.f_blocks * st.f_frsize
+        if total < 256 * 1024 * 1024 or mnt.startswith("/boot"):  # 忽略 efi/boot 这类小分区
+            continue
+        free = st.f_bavail * st.f_frsize
+        seen.add(dev)
+        out.append({
+            "mnt": mnt,
+            "total": total // 1024 // 1024,
+            "used": (total - free) // 1024 // 1024,
+        })
+    out.sort(key=lambda d: -d["total"])
+    return out
+
+
 def read_disk(path="/"):
     st = os.statvfs(path)
     total = st.f_blocks * st.f_frsize
