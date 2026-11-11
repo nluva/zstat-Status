@@ -40,6 +40,33 @@ case "$ROLE" in
 esac
 
 C_G='\033[32m'; C_R='\033[31m'; C_Y='\033[33m'; C_0='\033[0m'
+# 找出「手动起的」探针进程（systemd 管不到的那些）。
+# 判定：解释器是 python*，且命令行里有任何一个参数（绝对路径或相对路径）
+# 解析后正好等于 $PREFIX/agent.py。这样不管 cwd 在哪、用哪种写法起的都能认出来。
+stray_agent_pids() {
+  TARGET="$PREFIX/agent.py"
+  for d in /proc/[0-9]*; do
+    [ -r "$d/cmdline" ] || continue
+    case "$(readlink "$d/exe" 2>/dev/null)" in
+      *python*) ;;
+      *) continue ;;
+    esac
+    CWD=$(readlink "$d/cwd" 2>/dev/null) || CWD=""
+    FOUND=0
+    for a in $(tr '\0' '\n' < "$d/cmdline" 2>/dev/null); do
+      case "$a" in
+        -*) continue ;;                 # 跳过参数选项
+        /*) p="$a" ;;                   # 绝对路径
+        *)  [ -n "$CWD" ] && p="$CWD/$a" || p="$a" ;;   # 相对路径按 cwd 拼
+      esac
+      # 规范化 ../ 和 ./ 这样的片段
+      rp=$(cd "$(dirname "$p")" 2>/dev/null && printf '%s/%s' "$(pwd -P)" "$(basename "$p")")
+      [ "$rp" = "$TARGET" ] && { FOUND=1; break; }
+    done
+    [ "$FOUND" = 1 ] && echo "${d#/proc/}"
+  done
+}
+
 say()  { printf '%s\n' "$*"; }
 info() { printf "${C_G}[信息]${C_0} %s\n" "$*"; }
 warn() { printf "${C_Y}[注意]${C_0} %s\n" "$*"; }
@@ -289,7 +316,6 @@ if [ "$ROLE" = "server" ]; then
 }
 JSON
   chmod 600 "$PREFIX/server.json"
-  svc deploy/zstat-server.service zstat-server
   if [ -z "$ZSTAT_PREFIX" ]; then
     sleep 2
     if ! systemctl is-active --quiet zstat-server; then
@@ -652,6 +678,16 @@ if [ "$ROLE" = "uninstall" ]; then
       systemctl disable --now zstat-agent >/dev/null 2>&1 || true
       rm -f /etc/systemd/system/zstat-agent.service
       say "探针服务已停"
+    fi
+    # systemd 只管它自己起的那个；手动 nohup 起的要在卸载时一并清掉，
+    # 否则它会继续每 5 秒往面板上报，把新探针的数据盖掉（踩过这个坑）
+    STRAY=$(stray_agent_pids | tr '\n' ' ')
+    if [ -n "$(echo $STRAY)" ]; then
+      kill $STRAY 2>/dev/null || true
+      sleep 1
+      STILL=$(stray_agent_pids | tr '\n' ' ')
+      [ -n "$(echo $STILL)" ] && kill -9 $STILL 2>/dev/null || true
+      say "顺手清掉了手动起的探针进程：$STRAY"
     fi
   fi
   systemctl daemon-reload >/dev/null 2>&1 || true
