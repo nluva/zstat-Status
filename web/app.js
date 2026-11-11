@@ -11,6 +11,14 @@ function speed(n){
   return n < 0 ? '—' : fmtBytes(n) + '/s';
 }
 
+function diskTip(s){
+  const list = (s.disks || []).filter(d => num(d.total) > 0);
+  if (list.length > 1) {
+    return list.map(d => `${d.mnt === '/' ? '系统盘' : d.mnt}　已用 ${fmtBytes(num(d.used) * 1048576)}，共 ${fmtBytes(num(d.total) * 1048576)}`).join('\n');
+  }
+  return `已用 ${fmtBytes(num(s.hdd_used) * 1048576)}，共 ${fmtBytes(num(s.hdd_total) * 1048576)}`;
+}
+
 function pct(used, total){ return total > 0 ? Math.min(100, Math.round(used / total * 100)) : 0; }
 
 function esc(s){
@@ -81,7 +89,7 @@ function render(data){
       <td class="c-traffic" data-k="流量"><span class="mono">↓ ${fmtBytes(num(s.network_in))} &nbsp; ↑ ${fmtBytes(num(s.network_out))}</span></td>
       <td class="c-bar" data-k="CPU">${bar(s.cpu, num(s.cpu_cores) ? num(s.cpu_cores) + ' 核 · ' + (s.cpu_model || '未知型号') : (s.cpu_model || ''))}</td>
       <td class="c-bar" data-k="RAM">${bar(ram, `内存 已用 ${fmtBytes(num(s.memory_used))}，共 ${fmtBytes(num(s.memory_total))}　SWAP 已用 ${fmtBytes(num(s.swap_used))}/共 ${fmtBytes(num(s.swap_total))}`)}</td>
-      <td class="c-bar" data-k="硬盘">${bar(rom, `已用 ${fmtBytes(num(s.hdd_used)*1024*1024)}，共 ${fmtBytes(num(s.hdd_total)*1024*1024)}`)}</td>
+      <td class="c-bar" data-k="硬盘">${bar(rom, diskTip(s))}</td>
     </tr>`;
   }).join('');
 
