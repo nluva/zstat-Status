@@ -81,10 +81,10 @@ def snapshot():
                 item["stale"] = False
             out.append(item)
 
-    order = [str(x) for x in (CONF_DATA.get("order") or [])]
+    order = [str(x).lower() for x in (CONF_DATA.get("order") or [])]
     if order:
         rank = {k: i for i, k in enumerate(order)}
-        out.sort(key=lambda it: (rank.get(str(it.get("user") or ""), len(rank)),
+        out.sort(key=lambda it: (rank.get(str(it.get("user") or "").lower(), len(rank)),
                                  str(it.get("name") or "")))
     return out
 
@@ -119,8 +119,9 @@ def auth_ok(msg):
 def apply_account(new):
     """账号里配了到期日/周期就以面板为准（这样在面板里续期才不会被探针覆盖）。"""
     refresh_conf()
+    me = str(new.get("user") or "").lower()
     for u in CONF_DATA.get("users") or []:
-        if u.get("user") == new.get("user") or (u.get("name") and u.get("name") == new.get("name")):
+        if str(u.get("user") or "").lower() == me or (u.get("name") and u.get("name") == new.get("name")):
             if u.get("expire"):
                 new["type"] = u["expire"]
             if u.get("cycle"):
@@ -161,7 +162,8 @@ async def handle(reader, writer):
                 continue
             # 用账号当 key：两台机器万一起了同名，也不会互相覆盖
             key = str(msg.get("user") or "").strip().lower() or name
-            payload = {k: v for k, v in msg.items() if k not in ("token", "user", "password")}
+            payload = {k: v for k, v in msg.items() if k not in ("token", "password")}
+            payload["user"] = key      # 要留着，apply_account 靠它认人
             with LOCK:
                 SERVERS[key] = merge(SERVERS.get(key), payload)
                 SERVERS[key]["_user"] = key    # 排序用，key 就是账号
